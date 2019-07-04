@@ -51,6 +51,7 @@ __global__ void reduceBlock_BLOCK(double*idata,double*output,unsigned int *time_
     double __shared__ sdata[64];
     unsigned int tid = block.thread_rank();
     unsigned int  start,stop;
+<<<<<<< HEAD
     // if(tid<32)
     // {
         sdata[tid]=idata[tid];
@@ -60,11 +61,23 @@ __global__ void reduceBlock_BLOCK(double*idata,double*output,unsigned int *time_
     asm volatile ("mov.u32 %0, %%clock;" : "=r"(start) :: "memory");
     // if(tid<32)
     // {   
+=======
+    if(tid<32)
+    {
+        sdata[tid]=idata[tid];
+        sdata[tid+32]=0;
+    }
+
+    asm volatile ("mov.u32 %0, %%clock;" : "=r"(start) :: "memory");
+    if(tid<32)
+    {   
+>>>>>>> 4a07f9c8515455f7e4d74b5409ddce98c9e06879
         sdata[tid]+=sdata[tid+16];cg::sync(block);
         sdata[tid]+=sdata[tid+8];cg::sync(block);
         sdata[tid]+=sdata[tid+4];cg::sync(block);
         sdata[tid]+=sdata[tid+2];cg::sync(block);
         sdata[tid]+=sdata[tid+1];cg::sync(block);
+<<<<<<< HEAD
     // }  
     
     asm volatile ("mov.u32 %0, %%clock;" : "=r"(stop) :: "memory");
@@ -98,6 +111,9 @@ __global__ void reduceBlock_TILE(double*idata,double*output,unsigned int *time_s
     // sdata[tid]+=sdata[tid+4];cg::sync(cg::tiled_partition<8>(block));
     // sdata[tid]+=sdata[tid+2];cg::sync(cg::tiled_partition<4>(block));
     // sdata[tid]+=sdata[tid+1];cg::sync(cg::tiled_partition<2>(block));
+=======
+    }  
+>>>>>>> 4a07f9c8515455f7e4d74b5409ddce98c9e06879
     
     asm volatile ("mov.u32 %0, %%clock;" : "=r"(stop) :: "memory");
     time_stamp[0]=start;
@@ -106,7 +122,11 @@ __global__ void reduceBlock_TILE(double*idata,double*output,unsigned int *time_s
         output[tid]=sdata[tid];
 }
 
+<<<<<<< HEAD
 __global__ void reduceBlock_TILEW(double*idata,double*output,unsigned int *time_stamp)
+=======
+__global__ void reduceBlock_TILE(double*idata,double*output,unsigned int *time_stamp)
+>>>>>>> 4a07f9c8515455f7e4d74b5409ddce98c9e06879
 {
     cg::thread_block block = cg::this_thread_block();
     cg::thread_block_tile<32> tile32 = cg::tiled_partition<32>(block);
@@ -155,6 +175,7 @@ __global__ void reduceBlock_SHUFFLE(double*idata,double*output,unsigned int *tim
     mySum+=tile32.shfl_down(mySum,4);
     mySum+=tile32.shfl_down(mySum,2);
     mySum+=tile32.shfl_down(mySum,1);
+<<<<<<< HEAD
     
     asm volatile ("mov.u32 %0, %%clock;" : "=r"(stop) :: "memory");
     if(tid==0)
@@ -189,6 +210,11 @@ __global__ void reduceBlock_COA(double*idata,double*output,unsigned int *time_st
     if(tid<4){sdata[tid]+=sdata[tid+4];cg::sync(cg::coalesced_threads());}
     if(tid<2){sdata[tid]+=sdata[tid+2];cg::sync(cg::coalesced_threads());}
     if(tid<1){sdata[tid]+=sdata[tid+1];cg::sync(cg::coalesced_threads());}
+=======
+    if(tid==0)
+        sdata[tid]=mySum;
+    
+>>>>>>> 4a07f9c8515455f7e4d74b5409ddce98c9e06879
     asm volatile ("mov.u32 %0, %%clock;" : "=r"(stop) :: "memory");
     time_stamp[0]=start;
     time_stamp[1]=stop;
@@ -196,10 +222,16 @@ __global__ void reduceBlock_COA(double*idata,double*output,unsigned int *time_st
         output[tid]=sdata[tid];
 }
 
+<<<<<<< HEAD
 __global__ void reduceBlock_COAW(double*idata,double*output,unsigned int *time_stamp)
 {
     cg::thread_block block = cg::this_thread_block();
     cg::thread_block_tile<32> tile32 = cg::tiled_partition<32>(block);
+=======
+__global__ void reduceBlock_SERIAL(double*idata,double*output,unsigned int *time_stamp)
+{
+    cg::thread_block block = cg::this_thread_block();
+>>>>>>> 4a07f9c8515455f7e4d74b5409ddce98c9e06879
 
     double __shared__ sdata[64];
     unsigned int tid = block.thread_rank();
@@ -207,6 +239,7 @@ __global__ void reduceBlock_COAW(double*idata,double*output,unsigned int *time_s
 
     sdata[tid]=idata[tid];
     sdata[tid+32]=0;
+<<<<<<< HEAD
     cg::coalesced_group csg = cg::coalesced_threads();
 
     asm volatile ("mov.u32 %0, %%clock;" : "=r"(start) :: "memory");
@@ -315,6 +348,14 @@ __global__ void reduceBlock_SERIAL(double*idata,double*output,unsigned int *time
     // if(tid==0)
     // {
         mySum+=sdata[0];
+=======
+
+    double mySum = sdata[tid];
+
+    asm volatile ("mov.u32 %0, %%clock;" : "=r"(start) :: "memory");
+    if(tid==0)
+    {
+>>>>>>> 4a07f9c8515455f7e4d74b5409ddce98c9e06879
         mySum+=sdata[1];
         mySum+=sdata[2];
         mySum+=sdata[3];
@@ -347,6 +388,7 @@ __global__ void reduceBlock_SERIAL(double*idata,double*output,unsigned int *time
         mySum+=sdata[30];
         mySum+=sdata[31];
         sdata[tid]=mySum;
+<<<<<<< HEAD
     // }
     asm volatile ("mov.u32 %0, %%clock;" : "=r"(stop) :: "memory");
     time_stamp[0]=start;
@@ -379,12 +421,16 @@ __global__ void reduceBlock_SERIAL_BASIC(double*idata,double*output,unsigned int
         // sync(tile32);
         // sync(tile32);
     // }
+=======
+    }
+>>>>>>> 4a07f9c8515455f7e4d74b5409ddce98c9e06879
     asm volatile ("mov.u32 %0, %%clock;" : "=r"(stop) :: "memory");
     time_stamp[0]=start;
     time_stamp[1]=stop;
     if(tid==0)
         output[tid]=sdata[tid];
 }
+<<<<<<< HEAD
 
 __global__ void k_base_kernel (float q, float p, double *out, unsigned int *time_stamp=NULL, unsigned int tile=32){
         unsigned int id = threadIdx.x + blockIdx.x * blockDim.x;
@@ -412,17 +458,30 @@ int main()
     double* h_input = (double*)malloc(sizeof(double)*32);
     double* h_output = (double*)malloc(sizeof(double)*20);
     unsigned int * h_time_stamp = (unsigned int*)malloc(sizeof(unsigned int)*40);
+=======
+int main()
+{
+    double* h_input = (double*)malloc(sizeof(double)*32);
+    double* h_output = (double*)malloc(sizeof(double)*4);
+    unsigned int * h_time_stamp = (unsigned int*)malloc(sizeof(unsigned int)*8);
+>>>>>>> 4a07f9c8515455f7e4d74b5409ddce98c9e06879
     double* d_input;
     double* d_output;
     unsigned int* d_time_stamp;
     cudaMalloc((void**)&d_input, sizeof(double)*32);
+<<<<<<< HEAD
     cudaMalloc((void**)&d_output, sizeof(double)*20);
     cudaMalloc((void**)&d_time_stamp , sizeof(unsigned int)*40);
+=======
+    cudaMalloc((void**)&d_output, sizeof(double)*4);
+    cudaMalloc((void**)&d_time_stamp , sizeof(unsigned int)*8);
+>>>>>>> 4a07f9c8515455f7e4d74b5409ddce98c9e06879
     for(int i=0; i<32; i++)
     {
         h_input[i]=i;
     }
     cudaMemcpy(d_input, h_input, sizeof(double)*32, cudaMemcpyHostToDevice);
+<<<<<<< HEAD
     reduceBlock_BLOCK<<<1,32>>>(d_input,d_output+8,d_time_stamp+16);
     reduceBlock_SERIAL<<<1,32>>>(d_input,d_output+0,d_time_stamp+0);
     reduceBlock_NOSYNC<<<1,32>>>(d_input,d_output+1,d_time_stamp+2);
@@ -436,11 +495,20 @@ int main()
     k_base_kernel<<<1,32>>>(2,4,d_output+10,d_time_stamp+20);
     cudaMemcpy(h_output, d_output, sizeof(double)*20, cudaMemcpyDeviceToHost);
     cudaMemcpy(h_time_stamp, d_time_stamp, sizeof(unsigned int)*40, cudaMemcpyDeviceToHost);
+=======
+    reduceBlock_TILE<<<1,32>>>(d_input,d_output,d_time_stamp);
+    reduceBlock_SHUFFLE<<<1,32>>>(d_input,d_output+1,d_time_stamp+2);
+    reduceBlock_BLOCK<<<1,64>>>(d_input,d_output+2,d_time_stamp+4);
+    reduceBlock_SERIAL<<<1,32>>>(d_input,d_output+3,d_time_stamp+6);
+    cudaMemcpy(h_output, d_output, sizeof(double)*4, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_time_stamp, d_time_stamp, sizeof(unsigned int)*8, cudaMemcpyDeviceToHost);
+>>>>>>> 4a07f9c8515455f7e4d74b5409ddce98c9e06879
     cudaError_t e=cudaGetLastError();
     if(e!=cudaSuccess)
     {
         printf("Cuda failure %s:%d: '%s'\n",__FILE__,__LINE__,cudaGetErrorString(e));
     }
+<<<<<<< HEAD
     printf("type\tserial\tnosync\ttile\ttilewarp\ttile_shuffle\tcoa\tcoawarp\tcoa_shuffle\tblock\tbasic\n");
     printf("result:\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\n",
         h_output[0],
@@ -466,6 +534,13 @@ int main()
         h_time_stamp[17]-h_time_stamp[16],
         h_time_stamp[19]-h_time_stamp[18],
         h_time_stamp[21]-h_time_stamp[20]);
+=======
+    printf("result: %f %f %f %f\n",h_output[0],h_output[1],h_output[2],h_output[3]);
+    printf("time: %d %d %d %d\n",h_time_stamp[1]-h_time_stamp[0],
+        h_time_stamp[3]-h_time_stamp[2],
+        h_time_stamp[5]-h_time_stamp[4],
+        h_time_stamp[7]-h_time_stamp[6]);
+>>>>>>> 4a07f9c8515455f7e4d74b5409ddce98c9e06879
  }
 
 
