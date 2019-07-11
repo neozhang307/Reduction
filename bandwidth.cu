@@ -197,7 +197,7 @@ __global__ void copy_basic(double *g_idata, double *g_odata, unsigned int n)
     cudaDeviceReset();\
   }while(0);\
 
-#define TEST_TIME 2
+#define TEST_TIME 21
 #define SKIP 1
 
 int main()
