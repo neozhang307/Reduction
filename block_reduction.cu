@@ -186,7 +186,8 @@ __device__ __forceinline__ T block_reduce_warpserial(T mySum, T* sdata, cg::thre
                                 mySum+=sdata[tid+640];mySum+=sdata[tid+672];mySum+=sdata[tid+704];mySum+=sdata[tid+736];
                                 mySum+=sdata[tid+768];mySum+=sdata[tid+800];mySum+=sdata[tid+832];mySum+=sdata[tid+864];
                                 mySum+=sdata[tid+896];mySum+=sdata[tid+928];mySum+=sdata[tid+960];mySum+=sdata[tid+992];}
-            if(blockSize>=512){mySum+=sdata[tid+256];mySum+=sdata[tid+288];mySum+=sdata[tid+320];mySum+=sdata[tid+352];mySum+=sdata[tid+384];mySum+=sdata[tid+416];mySum+=sdata[tid+448];mySum+=sdata[tid+480];}
+            if(blockSize>=512){mySum+=sdata[tid+256];mySum+=sdata[tid+288];mySum+=sdata[tid+320];mySum+=sdata[tid+352];
+                                mySum+=sdata[tid+384];mySum+=sdata[tid+416];mySum+=sdata[tid+448];mySum+=sdata[tid+480];}
             if(blockSize>=256){mySum+=sdata[tid+128];mySum+=sdata[tid+160];mySum+=sdata[tid+192];mySum+=sdata[tid+224];}
             if(blockSize>=128){mySum+=sdata[tid+64];mySum+=sdata[tid+96];}
             if(blockSize>=64)mySum+=sdata[tid+32];
@@ -361,7 +362,7 @@ reduce_reduce_sync(double *g_idata, double *g_odata, unsigned int *time_stamp)
 #include<cmath>
 
 
-#define single_test(THREADSIZE,func) \
+#define single_test(THREADSIZE,func,latency,result) \
     do{double* h_input = (double*)malloc(sizeof(double)*THREADSIZE); \
     double* h_output = (double*)malloc(sizeof(double)*THREADSIZE); \
     unsigned int * h_time_stamp = (unsigned int*)malloc(sizeof(unsigned int)*THREADSIZE/32*2); \
@@ -373,7 +374,7 @@ reduce_reduce_sync(double *g_idata, double *g_odata, unsigned int *time_stamp)
     cudaMalloc((void**)&d_time_stamp , sizeof(unsigned int)*THREADSIZE/32*2); \
     for(int i=0; i<THREADSIZE; i++) \
     { \
-        h_input[i]=i; \
+        h_input[i]=i*i; \
     } \
     cudaMemcpy(d_input, h_input, sizeof(double)*THREADSIZE, cudaMemcpyHostToDevice); \
     func<THREADSIZE><<<1,THREADSIZE>>>(d_input,d_output,d_time_stamp); \
@@ -396,10 +397,8 @@ reduce_reduce_sync(double *g_idata, double *g_odata, unsigned int *time_stamp)
         begin=min(begin,h_time_stamp[i*2]);\
         end=max(begin,h_time_stamp[i*2+1]);\
     }\
-    printf("%s\t%d\t%f\t",\
-        #func,THREADSIZE,h_output[0]);\
-    printf("%d\n",\
-        end-begin);\
+    latency=end-begin;\
+    result=h_output[0];\
     free(h_input);\
     free(h_output);\
     free(h_time_stamp);\
@@ -407,6 +406,40 @@ reduce_reduce_sync(double *g_idata, double *g_odata, unsigned int *time_stamp)
     cudaFree(d_output);\
     cudaFree(d_time_stamp);}while(0)\
 
+#define repeattime 101
+
+#define repeat_test(THREADSIZE,func,rep) \
+    do{\
+    double latencys[rep];\
+    double latency=0;\
+    double results[rep];\
+    double result=0;\
+    for(int i=0; i<rep; i++)\
+    {\
+        single_test(THREADSIZE,func,latency,result);\
+        latencys[i]=latency;\
+        results[i]=result;\
+    }\
+    double sum=0;\
+    for(int i=1; i<rep; i++)\
+    {\
+        sum+=latencys[i];\
+    }\
+    double sumr=0;\
+    for(int i=1; i<rep; i++)\
+    {\
+        sumr+=results[i];\
+    }\
+    unsigned int correct=0;\
+    for(int i=0; i<THREADSIZE; i++)\
+    {\
+        correct+=i*i;\
+    }\
+    printf("%s\t%d\t",\
+        #func,THREADSIZE);\
+    printf("%u\t%u\t%f\n",\
+        correct,(unsigned int)(sumr/(rep-1)),sum/(rep-1));\
+    }while(0)
 
 int main()
 {
@@ -417,33 +450,33 @@ int main()
 //     single_test(256,reduce0);
 //     single_test(512,reduce0);
 //     single_test(1024,reduce0);
+    printf("funcname\tthread\tcorrect\tresult\tlatency\n");
+    repeat_test(32,reduce_basic,repeattime);
+    repeat_test(64,reduce_basic,repeattime);
+    repeat_test(128,reduce_basic,repeattime);
+    repeat_test(256,reduce_basic,repeattime);
+    repeat_test(512,reduce_basic,repeattime);
+    repeat_test(1024,reduce_basic,repeattime);
 
-    single_test(32,reduce_basic);
-    single_test(64,reduce_basic);
-    single_test(128,reduce_basic);
-    single_test(256,reduce_basic);
-    single_test(512,reduce_basic);
-    single_test(1024,reduce_basic);
+    repeat_test(32,reduce_opt,repeattime);
+    repeat_test(64,reduce_opt,repeattime);
+    repeat_test(128,reduce_opt,repeattime);
+    repeat_test(256,reduce_opt,repeattime);
+    repeat_test(512,reduce_opt,repeattime);
+    repeat_test(1024,reduce_opt,repeattime);
 
-    single_test(32,reduce_opt);
-    single_test(64,reduce_opt);
-    single_test(128,reduce_opt);
-    single_test(256,reduce_opt);
-    single_test(512,reduce_opt);
-    single_test(1024,reduce_opt);
+    repeat_test(32,reduce_small_share,repeattime);
+    repeat_test(64,reduce_small_share,repeattime);
+    repeat_test(128,reduce_small_share,repeattime);
+    repeat_test(256,reduce_small_share,repeattime);
+    repeat_test(512,reduce_small_share,repeattime);
+    repeat_test(1024,reduce_small_share,repeattime);
 
-    single_test(32,reduce_small_share);
-    single_test(64,reduce_small_share);
-    single_test(128,reduce_small_share);
-    single_test(256,reduce_small_share);
-    single_test(512,reduce_small_share);
-    single_test(1024,reduce_small_share);
-
-    single_test(32,reduce_reduce_sync);
-    single_test(64,reduce_reduce_sync);
-    single_test(128,reduce_reduce_sync);
-    single_test(256,reduce_reduce_sync);
-    single_test(512,reduce_reduce_sync);
-    single_test(1024,reduce_reduce_sync);
+    repeat_test(32,reduce_reduce_sync,repeattime);
+    repeat_test(64,reduce_reduce_sync,repeattime);
+    repeat_test(128,reduce_reduce_sync,repeattime);
+    repeat_test(256,reduce_reduce_sync,repeattime);
+    repeat_test(512,reduce_reduce_sync,repeattime);
+    repeat_test(1024,reduce_reduce_sync,repeattime);
  }
 
