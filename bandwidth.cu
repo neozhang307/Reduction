@@ -22,39 +22,6 @@ __global__ void reduce_basic(double *g_idata, double *g_odata, unsigned int n)
     g_odata[tid]=sum;
 }
 
-__global__ void reduce_basic_warp(double *g_idata, double *g_odata,
-  unsigned int n, unsigned int executor_num, unsigned int *time_stamp)
-{
-    unsigned int tid = threadIdx.x; 
-    unsigned int i=threadIdx.x; 
-    unsigned int warp_id=i/32;
-    cg::thread_block cta = cg::this_thread_block();
-    unsigned int  start,stop;
-    __shared__ double sdata[4*1024];
-    double sum=0;
-    for(int i=tid; i<n; i+=blockDim.x)
-    {
-      sum=g_idata[i];
-      sdata[i]=sum;
-    }
-    cg::sync(cta);
-    asm volatile ("mov.u32 %0, %%clock;" : "=r"(start) :: "memory");
-    if(tid<executor_num)
-    {
-      while (i < n)
-      {
-        sum+=sdata[i];
-        i += executor_num;
-      }
-    }
-    asm volatile ("mov.u32 %0, %%clock;" : "=r"(stop) :: "memory");
-    g_odata[tid]=sum;
-    if(i%32==0)
-    {
-        time_stamp[warp_id*2]=start;
-        time_stamp[warp_id*2+1]=stop;
-    }
-}
 
 __global__ void copy_basic(double *g_idata, double *g_odata, unsigned int n)
 {
@@ -259,52 +226,6 @@ int main()
       }
 
 
-    unsigned int smsize=4*1024;
-    unsigned int thread=1024;
-    // unsigned int executor_num=32;
-    unsigned int latency_cycle;
-    unsigned int lat_cycle_s[TEST_TIME];
-    float latency_tmp;
-    for(unsigned int executor_num =1; executor_num<=32; executor_num++)
-    {
-        // for(thread=32; thread<=1024; thread*=2)
-        // {
-          for(int i=0; i<TEST_TIME; i++)
-          {
-             single_warp_test();
-             lat_cycle_s[i]=latency_cycle;
-          }      
-          latency_tmp=0;
-         for(int i=SKIP; i<TEST_TIME; i++)
-          {
-            latency_tmp+=lat_cycle_s[i];
-          }
-          latency_tmp=latency_tmp/(TEST_TIME-SKIP);
-          printf("thread %d, executer %d, smsize %d, time: %f cycle speed: %f Byte/cycle\n",
-                thread, executor_num, smsize, latency_tmp, (double)smsize*sizeof(double)/latency_tmp);
-        // }
-    }
-    for(unsigned int executor_num =32; executor_num<=1024; executor_num*=2)
-    {
-        // for(thread=32; thread<=1024; thread*=2)
-        // {
-          if(executor_num>thread)continue;
-          for(int i=0; i<TEST_TIME; i++)
-          {
-             single_warp_test();
-             lat_cycle_s[i]=latency_cycle;
-          }      
-          // single_warp_test();
-          latency_tmp=0;
-         for(int i=SKIP; i<TEST_TIME; i++)
-          {
-            latency_tmp+=lat_cycle_s[i];
-          }
-          latency_tmp=latency_tmp/(TEST_TIME-SKIP);
-          printf("thread %d, executer %d, smsize %d, time: %f cycle speed: %f Byte/cycle\n",
-                thread, executor_num, smsize, latency_tmp, (double)smsize*sizeof(double)/latency_tmp);
-        // }
-    }
 
 // printf("thread %d, executer %d, smsize %d, time: %d cycle speed: %f GB/s\n",
 //       thread, executor_num, smsize, latency, (double)smsize*sizeof(double)/latency);
