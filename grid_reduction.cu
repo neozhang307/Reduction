@@ -184,23 +184,33 @@ blockSize is the size of a block
     }
     return mySum; 
 }
+typedef double(*binary_reduction)(double, double*, cg::thread_block cta); 
 
-template <unsigned int blockSize, bool nIsPow2>
+template <binary_reduction block_reduction, unsigned int blockSize, bool nIsPow2>
 __global__ void
-reduce_opt(double *g_idata, double *g_odata, unsigned int n)
+reduce_grid(double *g_idata, double *g_odata, unsigned int n, bool useSM=true)
+/*
+size of g_odata no smaller than n; equal to the multiply of blockSize; 
+value index larger than n should be setted to 0 in advance;
+*/
 {
     // Handle to thread block group
     cg::thread_block cta = cg::this_thread_block();
     cg::grid_group gg = cg::this_grid();
 
-    double __shared__ sdata[blockSize];
-
+    // double __shared__ sdata[blockSize];
+    extern double  __shared__ sm[];
+    double* sdata;
+    if(useSM==true)
+        sdata=sm;
+    else
+        sdata=g_odata;
     // load shared mem
     unsigned int tid = threadIdx.x;
 
     // double mySum = g_idata[i];
     double  mySum = 0;
-    // if(n>threashold)
+    if(n>2048)
     {
         mySum = serial_reduce<double,nIsPow2>(n, 
             tid, blockIdx.x,
@@ -208,50 +218,99 @@ reduce_opt(double *g_idata, double *g_odata, unsigned int n)
                 g_idata);
         g_odata[blockIdx.x*blockDim.x+threadIdx.x] = mySum;
         cg::sync(gg);
+    
+        // write result for this block to global mem
+        if(blockIdx.x==0)
+        {
+            mySum=0;
+            mySum = serial_reduce_final<double,blockSize>(blockSize*gridDim.x, 
+                tid,
+                g_odata);
+
+            mySum=block_reduction(mySum, sdata, cta);
+            if (tid == 0) g_odata[blockIdx.x] = mySum;
+        }
     }
-    // write result for this block to global mem
+    else
+    {
+        // use fewer threads is more profitable
+        if(blockIdx.x==0)
+        {
+            mySum=0;
+            serial_reduce<double,nIsPow2>(n, 
+            tid, 0,
+            blockDim.x, blockDim.x*1*2,
+                g_idata);
+            mySum=block_reduction(mySum, sdata, cta);
+            if (tid == 0) g_odata[blockIdx.x] = mySum;
+        }
+    }
+}
+
+
+template <bool nIsPow2>
+__global__ void
+reduce_kernel1(double *g_idata, double *g_odata, unsigned int n)
+/*
+size of g_odata no smaller than n; equal to the multiply of blockSize; 
+value index larger than n should be setted to 0 in advance;
+*/
+{
+    // Handle to thread block group
+    cg::thread_block cta = cg::this_thread_block();
+    cg::grid_group gg = cg::this_grid();
+
+    // double __shared__ sdata[blockSize];
+    // load shared mem
+    unsigned int tid = threadIdx.x;
+
+    // double mySum = g_idata[i];
+    double  mySum = 0;
+
+    mySum = serial_reduce<double,nIsPow2>(n, 
+        tid, blockIdx.x,
+        blockDim.x, blockDim.x*gridDim.x*2,
+            g_idata);
+    g_odata[blockIdx.x*blockDim.x+threadIdx.x] = mySum;
+}
+
+template <binary_reduction block_reduction, unsigned int blockSize, bool nIsPow2>
+__global__ void
+reduce_kernel2(double *g_idata, double *g_odata, unsigned int n, bool useSM=true)
+/*
+size of g_odata no smaller than n; equal to the multiply of blockSize; 
+value index larger than n should be setted to 0 in advance;
+*/
+{
+    // Handle to thread block group
+    cg::thread_block cta = cg::this_thread_block();
+    cg::grid_group gg = cg::this_grid();
+
+    // double __shared__ sdata[blockSize];
+    extern double  __shared__ sm[];
+    double* sdata;
+    if(useSM==true)
+        sdata=sm;
+    else
+        sdata=g_odata;
+    // load shared mem
+    unsigned int tid = threadIdx.x;
+
+    // double mySum = g_idata[i];
+    double  mySum = 0;
+
     if(blockIdx.x==0)
     {
         mySum=0;
-        mySum = serial_reduce_final<double,blockSize>(blockSize*gridDim.x, 
+        mySum = serial_reduce_final<double,blockSize>(n, 
             tid,
             g_odata);
 
-        mySum=block_reduce_cuda_sample_opt<double,blockSize>(mySum, sdata, cta);
+        mySum=block_reduction(mySum, sdata, cta);
         if (tid == 0) g_odata[blockIdx.x] = mySum;
     }
-}
-
-
-template <unsigned int blockSize>
-__global__ void
-reduce_reduce_sync(double *g_idata, double *g_odata, unsigned int *time_stamp)
-{
-    cg::thread_block cta = cg::this_thread_block();
-    cg::grid_group gg = cg::this_grid();
-    // double __shared__ sdata[blockSize];
-
-    unsigned int tid = threadIdx.x;
-    unsigned int warp_id=tid/32;
-
-    unsigned int  start,stop;
-    double mySum = 0;
-
-    mySum += g_idata[tid];
-
-    asm volatile ("mov.u32 %0, %%clock;" : "=r"(start) :: "memory");
-    mySum=block_reduce_warpserial<double,blockSize>(mySum,g_idata,cta);
-    asm volatile ("mov.u32 %0, %%clock;" : "=r"(stop) :: "memory");
-    if(tid%32==0)
-    {
-        time_stamp[warp_id*2]=start;
-        time_stamp[warp_id*2+1]=stop;
-    }
-    // write result for this block to global mem
-    if (cta.thread_rank() == 0) g_odata[blockIdx.x] = mySum;
 
 }
-
 double cpu_reduce(double* array, unsigned int array_size)
 {
     double sum=0;
@@ -262,55 +321,84 @@ double cpu_reduce(double* array, unsigned int array_size)
     return sum;
 }
 
-// void __forceinline__ cooperative_launch(nKernel func,
-//     unsigned int blockPerGPU,unsigned int threadPerBlock, 
-//     unsigned int GPU_count=1, cudaLaunchParams *launchParamsList=NULL)
-// {
-//     void* KernelArgs[] = {};
-//     cudaLaunchCooperativeKernel((void*)func, blockPerGPU,threadPerBlock,KernelArgs,32,0);
-// }
+template <binary_reduction block_reduction, unsigned int blockSize, bool nIsPow2,bool useSM>
+void __forceinline__ launchKernelBasedReduction(double *g_idata, double *g_odata, unsigned int gridSize,  unsigned int n)
+{
+        reduce_kernel1<nIsPow2><<<gridSize,blockSize>>>(g_idata,g_odata,n); 
+        if(useSM==true)
+            reduce_kernel2<block_reduction,blockSize,false><<<gridSize,blockSize,blockSize*sizeof(double)>>>(g_odata,g_odata,n,true); 
+        else
+            reduce_kernel2<block_reduction,blockSize,false><<<gridSize,blockSize>>>(g_odata,g_odata,n,false); 
+
+}
+template <binary_reduction block_reduction, unsigned int blockSize, bool nIsPow2,bool useSM>
+void __forceinline__ gridBasedReduction(double *g_idata, double *g_odata, unsigned int gridSize,  unsigned int n)
+{
+    bool l_useSM=useSM;
+    void* KernelArgs[] = {(void**)&g_idata,(void**)&g_odata,(void*)&n,(void*)&l_useSM}; 
+
+    if( useSM==true)
+    {
+        cudaLaunchCooperativeKernel((void*)reduce_grid<block_reduction,blockSize,nIsPow2>, gridSize,blockSize, KernelArgs,blockSize*sizeof(double),0);
+    }   
+    else
+    {
+        cudaLaunchCooperativeKernel((void*)reduce_grid<block_reduction,blockSize,nIsPow2>, gridSize,blockSize, KernelArgs,0,0);
+    }
+}
+
+//        reduce_kernel1<true><<<2,BLOCKSIZE>>>(d_input,d_output,array_size); \
+        reduce_kernel2<block_reduce_warpserial<double, BLOCKSIZE>,BLOCKSIZE,true><<<2,BLOCKSIZE,BLOCKSIZE*sizeof(double)>>>(d_output,d_output,array_size,false); \
+
+//        strategy<block_reduce_kernel<double, BLOCKSIZE>,BLOCKSIZE,true,true>(d_input, d_output, GRIDSIZE,  array_size);\
+
+
+#define single_test(BLOCKSIZE,GRIDSIZE,  strategy, block_reduce_kernel) \
+    do{\
+        unsigned int array_size=BLOCKSIZE*GRIDSIZE*40;\
+        double* h_input = (double*)malloc(sizeof(double)*array_size); \
+        double* h_output = (double*)malloc(sizeof(double)*array_size); \
+        double* d_input; \
+        double* d_output; \
+        cudaMalloc((void**)&d_input, sizeof(double)*array_size); \
+        cudaMalloc((void**)&d_output, sizeof(double)*array_size); \
+        for(int i=0; i<array_size; i++) \
+        { \
+            h_input[i]=i; \
+        }\
+        cudaMemcpy(d_input, h_input, sizeof(double)*array_size, cudaMemcpyHostToDevice); \
+\
+\
+        bool l_useSM=true;\
+        void* KernelArgs[] = {(void**)&d_input,(void**)&d_output,(void*)&array_size,(void*)&l_useSM}; \
+        strategy<block_reduce_kernel<double, BLOCKSIZE>,BLOCKSIZE,true,true>(d_input, d_output, GRIDSIZE,  array_size);\
+        cudaDeviceSynchronize();\
+\
+        cudaMemcpy(h_output, d_output, sizeof(double)*array_size, cudaMemcpyDeviceToHost); \
+        cudaDeviceSynchronize(); \
+        double cpu_result=cpu_reduce(h_input,array_size);\
+        printf("%f-%f=%f\n",cpu_result,h_output[0],cpu_result-h_output[0]);\
+        cudaError_t e=cudaGetLastError(); \
+        if(e!=cudaSuccess) \
+        { \
+            printf("Cuda failure %s:%d: '%s'\n",__FILE__,__LINE__,cudaGetErrorString(e));\
+        }\
+        free(h_input);\
+        free(h_output);\
+        cudaFree(d_input);\
+        cudaFree(d_output);\
+    }while(0);
 
 #define BASIC 1024
 int main()
 {
-    do{
-        unsigned int array_size=BASIC*56;
-        double* h_input = (double*)malloc(sizeof(double)*array_size); 
-        double* h_output = (double*)malloc(sizeof(double)*array_size); 
-        double* d_input; 
-        double* d_output; 
-        cudaMalloc((void**)&d_input, sizeof(double)*array_size); 
-        cudaMalloc((void**)&d_output, sizeof(double)*array_size); 
-        for(int i=0; i<array_size; i++) 
-        { 
-            h_input[i]=i; 
-        }
-        void* KernelArgs[] = {(void**)&d_input,(void**)&d_output,(void*)&array_size}; 
-        cudaMemcpy(d_input, h_input, sizeof(double)*array_size, cudaMemcpyHostToDevice); 
+    cudaDeviceProp deviceProp;
+    cudaSetDevice(0);
+    cudaGetDeviceProperties(&deviceProp, 0);
+    unsigned int smx_count = deviceProp.multiProcessorCount;
 
-        // reduce_opt<BASIC,true><<<2,BASIC>>>(d_input,d_output,array_size); 
-        
-        cudaLaunchCooperativeKernel((void*)reduce_opt<BASIC,true>, 2,BASIC, KernelArgs,0,0);
-
-        cudaMemcpy(h_output, d_output, sizeof(double)*array_size, cudaMemcpyDeviceToHost); 
-        cudaDeviceSynchronize(); 
-        double cpu_result=cpu_reduce(h_input,array_size);
-        printf("%f:%f\n",cpu_result,h_output[0]);
-        // for(int i=0; i<4; i++)
-        // {
-        //     printf("%f\t",h_output[i]);
-        // }
-        cudaError_t e=cudaGetLastError(); 
-        if(e!=cudaSuccess) 
-        { 
-            printf("Cuda failure %s:%d: '%s'\n",__FILE__,__LINE__,cudaGetErrorString(e));
-        }
-        // result=h_output[0];
-        free(h_input);
-        free(h_output);
-        cudaFree(d_input);
-        cudaFree(d_output);
-    }while(0);
+        // single_test(1024,56,launchKernelBasedReduction,block_reduce_warpserial);
+        single_test(1024,56,gridBasedReduction,block_reduce_warpserial);
 
 //     single_test(32,reduce0);
 //     single_test(64,reduce0);
