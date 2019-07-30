@@ -205,18 +205,14 @@ value index larger than n should be setted to 0 in advance;
         sdata=sm;
     else
         sdata=g_odata;
-    // load shared mem
-    unsigned int tid = threadIdx.x;
-
-    // double mySum = g_idata[i];
     double  mySum = 0;
     if(n>2048)
     {
         mySum = serial_reduce<double,nIsPow2>(n, 
-            tid, blockIdx.x,
+            threadIdx.x, blockIdx.x,
             blockDim.x, blockDim.x*gridDim.x*2,
                 g_idata);
-        g_odata[blockIdx.x*blockDim.x+threadIdx.x] = mySum;
+        g_odata[gg.thread_rank()] = mySum;
         cg::sync(gg);
     
         // write result for this block to global mem
@@ -224,11 +220,11 @@ value index larger than n should be setted to 0 in advance;
         {
             mySum=0;
             mySum = serial_reduce_final<double,blockSize>(blockSize*gridDim.x, 
-                tid,
+                threadIdx.x,
                 g_odata);
 
             mySum=block_reduction(mySum, sdata, cta);
-            if (tid == 0) g_odata[blockIdx.x] = mySum;
+            if (threadIdx.x == 0) g_odata[blockIdx.x] = mySum;
         }
     }
     else
@@ -238,11 +234,11 @@ value index larger than n should be setted to 0 in advance;
         {
             mySum=0;
             serial_reduce<double,nIsPow2>(n, 
-            tid, 0,
+            threadIdx.x, 0,
             blockDim.x, blockDim.x*1*2,
                 g_idata);
             mySum=block_reduction(mySum, sdata, cta);
-            if (tid == 0) g_odata[blockIdx.x] = mySum;
+            if (threadIdx.x == 0) g_odata[blockIdx.x] = mySum;
         }
     }
 }
@@ -258,17 +254,12 @@ value index larger than n should be setted to 0 in advance;
 {
     // Handle to thread block group
     cg::thread_block cta = cg::this_thread_block();
-    cg::grid_group gg = cg::this_grid();
-
-    // double __shared__ sdata[blockSize];
-    // load shared mem
-    unsigned int tid = threadIdx.x;
 
     // double mySum = g_idata[i];
     double  mySum = 0;
 
     mySum = serial_reduce<double,nIsPow2>(n, 
-        tid, blockIdx.x,
+        threadIdx.x, blockIdx.x,
         blockDim.x, blockDim.x*gridDim.x*2,
             g_idata);
     g_odata[blockIdx.x*blockDim.x+threadIdx.x] = mySum;
@@ -284,7 +275,6 @@ value index larger than n should be setted to 0 in advance;
 {
     // Handle to thread block group
     cg::thread_block cta = cg::this_thread_block();
-    cg::grid_group gg = cg::this_grid();
 
     // double __shared__ sdata[blockSize];
     extern double  __shared__ sm[];
@@ -326,9 +316,9 @@ void __forceinline__ launchKernelBasedReduction(double *g_idata, double *g_odata
 {
         reduce_kernel1<nIsPow2><<<gridSize,blockSize>>>(g_idata,g_odata,n); 
         if(useSM==true)
-            reduce_kernel2<block_reduction,blockSize,false><<<gridSize,blockSize,blockSize*sizeof(double)>>>(g_odata,g_odata,n,true); 
+            reduce_kernel2<block_reduction,blockSize,false><<<1,blockSize,blockSize*sizeof(double)>>>(g_odata,g_odata,n,true); 
         else
-            reduce_kernel2<block_reduction,blockSize,false><<<gridSize,blockSize>>>(g_odata,g_odata,n,false); 
+            reduce_kernel2<block_reduction,blockSize,false><<<1,blockSize>>>(g_odata,g_odata,n,false); 
 
 }
 template <binary_reduction block_reduction, unsigned int blockSize, bool nIsPow2,bool useSM>
@@ -353,40 +343,36 @@ void __forceinline__ gridBasedReduction(double *g_idata, double *g_odata, unsign
 //        strategy<block_reduce_kernel<double, BLOCKSIZE>,BLOCKSIZE,true,true>(d_input, d_output, GRIDSIZE,  array_size);\
 
 
-#define single_test(BLOCKSIZE,GRIDSIZE,  strategy, block_reduce_kernel) \
+#define single_test(BLOCKSIZE,GRIDSIZE, SIZE ,strategy, block_reduce_kernel,useSM) \
     do{\
-        unsigned int array_size=BLOCKSIZE*GRIDSIZE*40;\
-        double* h_input = (double*)malloc(sizeof(double)*array_size); \
+        unsigned int array_size=SIZE;\
         double* h_output = (double*)malloc(sizeof(double)*array_size); \
         double* d_input; \
         double* d_output; \
+        cudaEvent_t start, end;\
+        cudaEventCreate(&start);\
+        cudaEventCreate(&end);\
         cudaMalloc((void**)&d_input, sizeof(double)*array_size); \
         cudaMalloc((void**)&d_output, sizeof(double)*array_size); \
-        for(int i=0; i<array_size; i++) \
-        { \
-            h_input[i]=i; \
-        }\
         cudaMemcpy(d_input, h_input, sizeof(double)*array_size, cudaMemcpyHostToDevice); \
-\
-\
-        bool l_useSM=true;\
-        void* KernelArgs[] = {(void**)&d_input,(void**)&d_output,(void*)&array_size,(void*)&l_useSM}; \
-        strategy<block_reduce_kernel<double, BLOCKSIZE>,BLOCKSIZE,true,true>(d_input, d_output, GRIDSIZE,  array_size);\
-        cudaDeviceSynchronize();\
-\
+        cudaEventRecord(start);\
+        strategy<block_reduce_kernel<double, BLOCKSIZE>,BLOCKSIZE,true,useSM>(d_input, d_output, GRIDSIZE,  array_size);\
+        cudaEventRecord(end);\
+        \
         cudaMemcpy(h_output, d_output, sizeof(double)*array_size, cudaMemcpyDeviceToHost); \
+        gpu_result=h_output[0];\
         cudaDeviceSynchronize(); \
-        double cpu_result=cpu_reduce(h_input,array_size);\
-        printf("%f-%f=%f\n",cpu_result,h_output[0],cpu_result-h_output[0]);\
         cudaError_t e=cudaGetLastError(); \
         if(e!=cudaSuccess) \
         { \
             printf("Cuda failure %s:%d: '%s'\n",__FILE__,__LINE__,cudaGetErrorString(e));\
         }\
-        free(h_input);\
+        cudaEventElapsedTime(&millisecond,start,end);\
         free(h_output);\
         cudaFree(d_input);\
         cudaFree(d_output);\
+        cudaEventDestroy(start);\
+        cudaEventDestroy(end);\
     }while(0);
 
 #define BASIC 1024
@@ -396,10 +382,74 @@ int main()
     cudaSetDevice(0);
     cudaGetDeviceProperties(&deviceProp, 0);
     unsigned int smx_count = deviceProp.multiProcessorCount;
+    double gpu_result;
 
-        // single_test(1024,56,launchKernelBasedReduction,block_reduce_warpserial);
-        single_test(1024,56,gridBasedReduction,block_reduce_warpserial);
+    float millisecond;
+    // float lats[TEST_TIME];
+    unsigned int thread_per_block=256;
+    unsigned int block_per_sm=4;
+    unsigned int data_per_thread=40960*1.2;
+    unsigned long size = thread_per_block*smx_count*data_per_thread;
+    double* h_input = (double*)malloc(sizeof(double)*size);
+    for(int i=0; i<size; i++) 
+    {
+        h_input[i]=1;
+    }
+    double cpu_result=cpu_reduce(h_input,size);
+    switch(thread_per_block)
+    {
+        case 32:
+            single_test(32,smx_count*block_per_sm,size,gridBasedReduction,block_reduce_warpserial,false);
+            break;
+        case 64:
+            single_test(64,smx_count*block_per_sm,size,gridBasedReduction,block_reduce_warpserial,false);
+            break;
+        case 128:
+            single_test(128,smx_count*block_per_sm,size,gridBasedReduction,block_reduce_warpserial,false);
+            break;
+        case 256:
+            single_test(256,smx_count*block_per_sm,size,gridBasedReduction,block_reduce_warpserial,false);
+            break;
+        case 512:
+            single_test(512,smx_count*block_per_sm,size,gridBasedReduction,block_reduce_warpserial,false);
+            break;
+        case 1024:
+            single_test(1024,smx_count*block_per_sm,size,gridBasedReduction,block_reduce_warpserial,false);
+            break;
+    }
+    
+    printf("%f-%f=%f\n",cpu_result,gpu_result,cpu_result-gpu_result);   
+    printf("block/SM %d thread %d totalsize %d time: %f ms speed: %f GB/s\n",\
+          1,thread_per_block, size,\
+          (double)millisecond, (double)size*sizeof(double)/1000/1000/1000/(millisecond/1000));\
 
+    switch(thread_per_block)
+    {
+        case 32:
+            single_test(32,smx_count*block_per_sm,size,launchKernelBasedReduction,block_reduce_warpserial,false);
+            break;
+        case 64:
+            single_test(64,smx_count*block_per_sm,size,launchKernelBasedReduction,block_reduce_warpserial,false);
+            break;
+        case 128:
+            single_test(128,smx_count*block_per_sm,size,launchKernelBasedReduction,block_reduce_warpserial,false);
+            break;
+        case 256:
+            single_test(256,smx_count*block_per_sm,size,launchKernelBasedReduction,block_reduce_warpserial,false);
+            break;
+        case 512:
+            single_test(512,smx_count*block_per_sm,size,launchKernelBasedReduction,block_reduce_warpserial,false);
+            break;
+        case 1024:
+            single_test(1024,smx_count*block_per_sm,size,launchKernelBasedReduction,block_reduce_warpserial,false);
+            break;
+    }
+    printf("%f-%f=%f\n",cpu_result,gpu_result,cpu_result-gpu_result);
+    printf("block/SM %d thread %d totalsize %d time: %f ms speed: %f GB/s\n",\
+          1,thread_per_block, size,\
+          (double)millisecond, (double)size*sizeof(double)/1000/1000/1000/(millisecond/1000));\
+
+    free(h_input);
 //     single_test(32,reduce0);
 //     single_test(64,reduce0);
 //     single_test(128,reduce0);
