@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <cooperative_groups.h>
 #include<math.h>
+#include"repeat.h"
 namespace cg = cooperative_groups;
 
 
@@ -15,13 +16,40 @@ __global__ void reduce_basic(double *g_idata, double *g_odata, unsigned int n)
     while (i < n)
     {
     	sum+=g_idata[i];
-    	// if(i+blockDim.x<n)
-    	sum+=g_idata[i+blockDim.x];
-    	i += gridSize;
+      i+=blockDim.x;
+      sum+=g_idata[i];
+      i+=blockDim.x;
+     //  sum+=g_idata[i];
+     //  i+=blockDim.x;
+     //  sum+=g_idata[i];
+    	// i += gridSize;
     }
     g_odata[tid]=sum;
 }
 
+#define BASICREDUCE(DEP) \
+__global__ void reduce_basic_DEP##DEP(double *g_idata, double *g_odata, unsigned int n)\
+{\
+    unsigned int tid = blockIdx.x*blockDim.x + threadIdx.x; \
+    unsigned int i=blockIdx.x*blockDim.x*4 + threadIdx.x; \
+    unsigned int gridSize = blockDim.x*gridDim.x*4-3*blockDim.x;\
+    double sum=0;\
+    while (i < n)\
+    {\
+      repeat##DEP(sum+=g_idata[i];i+=blockDim.x;);\
+    }\
+    g_odata[tid]=sum;\
+}
+
+BASICREDUCE(1)
+BASICREDUCE(2)
+BASICREDUCE(4)
+BASICREDUCE(8)
+BASICREDUCE(16)
+BASICREDUCE(32)
+BASICREDUCE(64)
+BASICREDUCE(128)
+BASICREDUCE(256)
 
 __global__ void copy_basic(double *g_idata, double *g_odata, unsigned int n)
 {
@@ -164,8 +192,8 @@ __global__ void copy_basic(double *g_idata, double *g_odata, unsigned int n)
     cudaDeviceReset();\
   }while(0);\
 
-#define TEST_TIME 21
-#define SKIP 1
+#define TEST_TIME 1
+#define SKIP 0
 
 int main()
 {
@@ -175,7 +203,7 @@ int main()
   	cudaGetDeviceProperties(&deviceProp, 0);
   	unsigned int smx_count = deviceProp.multiProcessorCount;
 
-    unsigned int base=2000;
+    unsigned int base=2048;
     size=base*smx_count*2048*2;
     
     float millisecond;
@@ -202,30 +230,40 @@ int main()
         millisecond=millisecond/(TEST_TIME-SKIP);
         printf("block/SM %d thread %d totalsize %d time: %f ms speed: %f GB/s\n",
           block,thread, size,
-          millisecond, size*sizeof(double)/millisecond/1000/1000);
+          millisecond, size*sizeof(double)*1000/millisecond/1000/1000/1000);
       }
     }
 
-    size=size/smx_count*2;
-      for(int thread=32; thread<=1024; thread*=2)
-      {
-        for(int i=0; i<TEST_TIME; i++)
-        {
-           single_block_test(reduce_basic);
-           lats[i]=millisecond;
-        }
-        millisecond=0;
-       for(int i=SKIP; i<TEST_TIME; i++)
-        {
-          millisecond+=lats[i];
-        }
-        millisecond=millisecond/(TEST_TIME-SKIP);
-        printf("block/GPU %d thread %d totalsize %d time: %f ms speed: %f GB/s\n",
-          1,thread, size,
-          millisecond, size*sizeof(double)/millisecond/1000/1000);
-      }
+    // size=size/smx_count*2;
 
+    // #define single_block(func) \
+    //   for(int thread=32; thread<=1024; thread*=2)\
+    //   {\
+    //     for(int i=0; i<TEST_TIME; i++)\
+    //     {\
+    //        single_block_test(func);\
+    //        lats[i]=millisecond;\
+    //     }\
+    //     millisecond=0;\
+    //    for(int i=SKIP; i<TEST_TIME; i++)\
+    //     {\
+    //       millisecond+=lats[i];\
+    //     }\
+    //     millisecond=millisecond/(TEST_TIME-SKIP);\
+    //     printf("func %s, block/GPU %d thread %d totalsize %d time: %f ms speed: %f GB/s\n",\
+    //       #func, 1,thread, size,\
+    //       millisecond, size*sizeof(double)/millisecond/1000/1000);\
+    //   }
 
+    //   single_block(reduce_basic_DEP1);
+    //   single_block(reduce_basic_DEP2);
+    //   single_block(reduce_basic_DEP4);
+    //   single_block(reduce_basic_DEP8);
+    //   single_block(reduce_basic_DEP16);
+    //   single_block(reduce_basic_DEP32);
+    //   single_block(reduce_basic_DEP64);
+    //   single_block(reduce_basic_DEP128);
+    //   single_block(reduce_basic_DEP256);
 
 // printf("thread %d, executer %d, smsize %d, time: %d cycle speed: %f GB/s\n",
 //       thread, executor_num, smsize, latency, (double)smsize*sizeof(double)/latency);
