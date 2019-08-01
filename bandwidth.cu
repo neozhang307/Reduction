@@ -16,27 +16,29 @@ __global__ void reduce_basic(double *g_idata, double *g_odata, unsigned int n)
     while (i < n)
     {
     	sum+=g_idata[i];
-      i+=blockDim.x;
-      sum+=g_idata[i];
-      i+=blockDim.x;
+      sum+=g_idata[i+blockDim.x];
      //  sum+=g_idata[i];
      //  i+=blockDim.x;
      //  sum+=g_idata[i];
-    	// i += gridSize;
+    	i += gridSize;
     }
     g_odata[tid]=sum;
 }
+
+
+
 
 #define BASICREDUCE(DEP) \
 __global__ void reduce_basic_DEP##DEP(double *g_idata, double *g_odata, unsigned int n)\
 {\
     unsigned int tid = blockIdx.x*blockDim.x + threadIdx.x; \
-    unsigned int i=blockIdx.x*blockDim.x*4 + threadIdx.x; \
-    unsigned int gridSize = blockDim.x*gridDim.x*4-3*blockDim.x;\
+    unsigned int i=blockIdx.x*blockDim.x*DEP + threadIdx.x; \
+    unsigned int gridSize = blockDim.x*gridDim.x*DEP-(DEP)*blockDim.x;\
     double sum=0;\
     while (i < n)\
     {\
       repeat##DEP(sum+=g_idata[i];i+=blockDim.x;);\
+      i+=gridSize;\
     }\
     g_odata[tid]=sum;\
 }
@@ -50,6 +52,7 @@ BASICREDUCE(32)
 BASICREDUCE(64)
 BASICREDUCE(128)
 BASICREDUCE(256)
+BASICREDUCE(512)
 
 __global__ void copy_basic(double *g_idata, double *g_odata, unsigned int n)
 {
@@ -129,7 +132,7 @@ __global__ void copy_basic(double *g_idata, double *g_odata, unsigned int n)
   }\
   cudaMemcpy(d_input, h_input, size*sizeof(double), cudaMemcpyHostToDevice);\
   cudaEventRecord(start);\
-  func<<<1,thread>>>(d_input,d_output,size);\
+  func<<<block,thread>>>(d_input,d_output,size);\
   cudaEventRecord(end);\
   cudaDeviceSynchronize();\
   cudaError_t e=cudaGetLastError();\
@@ -195,6 +198,26 @@ __global__ void copy_basic(double *g_idata, double *g_odata, unsigned int n)
 #define TEST_TIME 1
 #define SKIP 0
 
+
+#define single_size_test(func) \
+{\
+  unsigned int thread=1024;\
+        for(int i=0; i<TEST_TIME; i++)\
+        {\
+           single_block_test(func);\
+           lats[i]=millisecond;\
+        }\
+        millisecond=0;\
+       for(int i=SKIP; i<TEST_TIME; i++)\
+        {\
+          millisecond+=lats[i];\
+        }\
+        millisecond=millisecond/(TEST_TIME-SKIP);\
+        printf("func %s, block %d thread %d totalsize %d time: %f ms speed: %f GB/s\n",\
+          #func, block,thread, size,\
+          millisecond, size*sizeof(double)/millisecond/1000/1000);\
+}
+
 int main()
 {
 	unsigned int size=500000000;
@@ -203,8 +226,8 @@ int main()
   	cudaGetDeviceProperties(&deviceProp, 0);
   	unsigned int smx_count = deviceProp.multiProcessorCount;
 
-    unsigned int base=2048;
-    size=base*smx_count*2048*2;
+    unsigned int base=4096;
+    size=base*smx_count*2048;
     
     float millisecond;
     float lats[TEST_TIME];
@@ -213,58 +236,78 @@ int main()
    //  unsigned int block=1;
   	// unsigned int thread = 1024;
 
-    for(int block=1; block<=64; block*=2)
-    { 
-      for(int thread=32; thread<=1024; thread*=2)
-      {
-        for(int i=0; i<TEST_TIME; i++)
-        {
-           single_test(reduce_basic);
-           lats[i]=millisecond;
-        }
-        millisecond=0;
-       for(int i=SKIP; i<TEST_TIME; i++)
-        {
-          millisecond+=lats[i];
-        }
-        millisecond=millisecond/(TEST_TIME-SKIP);
-        printf("block/SM %d thread %d totalsize %d time: %f ms speed: %f GB/s\n",
-          block,thread, size,
-          millisecond, size*sizeof(double)*1000/millisecond/1000/1000/1000);
-      }
-    }
-
-    // size=size/smx_count*2;
-
-    // #define single_block(func) \
-    //   for(int thread=32; thread<=1024; thread*=2)\
-    //   {\
-    //     for(int i=0; i<TEST_TIME; i++)\
-    //     {\
-    //        single_block_test(func);\
-    //        lats[i]=millisecond;\
-    //     }\
-    //     millisecond=0;\
-    //    for(int i=SKIP; i<TEST_TIME; i++)\
-    //     {\
-    //       millisecond+=lats[i];\
-    //     }\
-    //     millisecond=millisecond/(TEST_TIME-SKIP);\
-    //     printf("func %s, block/GPU %d thread %d totalsize %d time: %f ms speed: %f GB/s\n",\
-    //       #func, 1,thread, size,\
-    //       millisecond, size*sizeof(double)/millisecond/1000/1000);\
+    // for(int block=1; block<=64; block*=2)
+    // { 
+    //   for(int thread=32; thread<=1024; thread*=2)
+    //   {
+    //     for(int i=0; i<TEST_TIME; i++)
+    //     {
+    //        single_test(reduce_basic);
+    //        lats[i]=millisecond;
+    //     }
+    //     millisecond=0;
+    //    for(int i=SKIP; i<TEST_TIME; i++)
+    //     {
+    //       millisecond+=lats[i];
+    //     }
+    //     millisecond=millisecond/(TEST_TIME-SKIP);
+    //     printf("block/SM %d thread %d totalsize %d time: %f ms speed: %f GB/s\n",
+    //       block,thread, size,
+    //       millisecond, size*sizeof(double)*1000/millisecond/1000/1000/1000);
     //   }
+    // }
 
-    //   single_block(reduce_basic_DEP1);
+    // unsigned int base_size=base*2048;
+
+      // #define single_block(func) \
+      // for(int thread=32; thread<=1024; thread*=2)\
+      // {\
+      //   for(int i=0; i<TEST_TIME; i++)\
+      //   {\
+      //      single_block_test(func);\
+      //      lats[i]=millisecond;\
+      //   }\
+      //   millisecond=0;\
+      //  for(int i=SKIP; i<TEST_TIME; i++)\
+      //   {\
+      //     millisecond+=lats[i];\
+      //   }\
+      //   millisecond=millisecond/(TEST_TIME-SKIP);\
+      //   printf("func %s, block %d thread %d totalsize %d time: %f ms speed: %f GB/s\n",\
+      //     #func, block,thread, size,\
+      //     millisecond, size*sizeof(double)/millisecond/1000/1000);\
+      // }
+
+
+
+    //   for(unsigned int block=1; block<=80;block*=2)
+    //   {
+    //     size=block*base_size;
+    //     single_block(reduce_basic_DEP2);
+    //     single_block(reduce_basic_DEP4);
+    //     single_block(reduce_basic_DEP8);
+    //   }
+    //   unsigned int block=80;
+    //   size=block*base_size;
     //   single_block(reduce_basic_DEP2);
     //   single_block(reduce_basic_DEP4);
     //   single_block(reduce_basic_DEP8);
-    //   single_block(reduce_basic_DEP16);
-    //   single_block(reduce_basic_DEP32);
-    //   single_block(reduce_basic_DEP64);
-    //   single_block(reduce_basic_DEP128);
-    //   single_block(reduce_basic_DEP256);
+    unsigned int block=1;
+    for(unsigned int size=1; size<=2048*2048; size*=2)
+    {
+      single_size_test(reduce_basic_DEP2);
+    }
 
+      // single_block(reduce_basic_DEP1);
+      // single_block(reduce_basic_DEP2);
+      // single_block(reduce_basic_DEP4);
+      // single_block(reduce_basic_DEP8);
+      // single_block(reduce_basic_DEP16);
+      // single_block(reduce_basic_DEP32);
+      // single_block(reduce_basic_DEP64);
+      // single_block(reduce_basic_DEP128);
+      // single_block(reduce_basic_DEP256);
+      // single_block(reduce_basic_DEP512);
 // printf("thread %d, executer %d, smsize %d, time: %d cycle speed: %f GB/s\n",
 //       thread, executor_num, smsize, latency, (double)smsize*sizeof(double)/latency);
     }
