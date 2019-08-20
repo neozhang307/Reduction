@@ -185,6 +185,41 @@ blockSize is the size of a block
     return mySum; 
 }
 
+// Utility class used to avoid linker errors with extern
+// unsized shared memory arrays with templated type
+template<class T>
+struct SharedMemory
+{
+    __device__ inline operator       T *()
+    {
+        extern __shared__ int __smem[];
+        return (T *)__smem;
+    }
+
+    __device__ inline operator const T *() const
+    {
+        extern __shared__ int __smem[];
+        return (T *)__smem;
+    }
+};
+
+// specialize for double to avoid unaligned memory
+// access compile errors
+template<>
+struct SharedMemory<double>
+{
+    __device__ inline operator       double *()
+    {
+        extern __shared__ double __smem_d[];
+        return (double *)__smem_d;
+    }
+
+    __device__ inline operator const double *() const
+    {
+        extern __shared__ double __smem_d[];
+        return (double *)__smem_d;
+    }
+};
 
 template <class T, unsigned int blockSize, bool nIsPow2, bool useSM, bool useWarpSerial>
 __global__ void
@@ -206,14 +241,13 @@ value index larger than n should be setted to 0 in advance;
     {
         block_reduction=block_reduce_cuda_sample_opt<T, blockSize>;
     }
-    extern T  __shared__ sm[];
     T* sdata;
     if(useSM==true)
-        sdata=sm;
+        sdata=SharedMemory<T>();
     else
         sdata=g_odata;
     T  mySum = 0;
-    if(n>2048)
+    if(gridDim.x>1)
     {
         mySum = serial_reduce<T,nIsPow2>(n, 
             threadIdx.x, blockIdx.x,
@@ -226,9 +260,10 @@ value index larger than n should be setted to 0 in advance;
         if(blockIdx.x==0)
         {
             mySum=0;
-            mySum = serial_reduce_final<double,blockSize>(blockSize*gridDim.x, 
+            mySum = serial_reduce_final<T,blockSize>(blockSize*gridDim.x, 
                 threadIdx.x,
                 g_odata);
+
             mySum=block_reduction(mySum, sdata, cta);
             if (threadIdx.x == 0) g_odata[blockIdx.x] = mySum;
         }
@@ -239,7 +274,7 @@ value index larger than n should be setted to 0 in advance;
         if(blockIdx.x==0)
         {
             mySum=0;
-            serial_reduce<double,nIsPow2>(n, 
+            mySum = serial_reduce<T,nIsPow2>(n, 
             threadIdx.x, 0,
             blockDim.x, blockDim.x*1*2,
                 g_idata);
@@ -283,10 +318,9 @@ value index larger than n should be setted to 0 in advance;
     // Handle to thread block group
     cg::thread_block cta = cg::this_thread_block();
 
-    extern T  __shared__ sm[];
     T* sdata;
     if(useSM==true)
-        sdata=sm;
+        sdata=SharedMemory<T>();
     else
         sdata=g_odata;
     
@@ -309,16 +343,17 @@ value index larger than n should be setted to 0 in advance;
         mySum=0;
         mySum = serial_reduce_final<T,blockSize>(n, 
             tid,
-            g_odata);
+            g_idata);
 
         mySum=block_reduction(mySum, sdata, cta);
         if (tid == 0) g_odata[blockIdx.x] = mySum;
     }
 
 }
-double cpu_reduce(double* array, unsigned int array_size)
+template <class T>
+T cpu_reduce(T* array, unsigned int array_size)
 {
-    double sum=0;
+    T sum=0;
     for(int i=0; i<array_size; i++)
     {
         sum+=array[i];
@@ -328,28 +363,65 @@ double cpu_reduce(double* array, unsigned int array_size)
 
 template <class T, unsigned int blockSize, bool nIsPow2,bool useSM, bool useWarpSerial>
 void __forceinline__ launchKernelBasedReduction(T *g_idata, T *g_odata, unsigned int gridSize,  unsigned int n)
-{
-        reduce_kernel1<T, nIsPow2><<<gridSize,blockSize>>>(g_idata,g_odata,n); 
-        if(useSM==true)
-            reduce_kernel2<T,blockSize,true, useWarpSerial><<<1,blockSize,blockSize*sizeof(T)>>>(g_odata,g_odata,n); 
+{  
+    // unsigned int l_n=n;
+        // if(true)
+        if(n>=304060.3592)
+        // if(true)
+        {
+            reduce_kernel1<T, nIsPow2><<<gridSize,blockSize>>>(g_idata,g_odata,n); 
+            // l_n=blockSize*gridSize;
+            if(useSM==true)
+                reduce_kernel2<T,blockSize,true, useWarpSerial><<<1,blockSize,blockSize*sizeof(T)>>>(g_odata,g_odata,blockSize*gridSize); 
+            else
+                reduce_kernel2<T,blockSize,false, useWarpSerial><<<1,blockSize>>>(g_odata,g_odata,blockSize*gridSize); 
+        }
         else
-            reduce_kernel2<T,blockSize,false, useWarpSerial><<<1,blockSize>>>(g_odata,g_odata,n); 
+        {
+            fprintf(stderr,"switch to single block with size %d\n",n);
+
+            if(useSM==true)
+                reduce_kernel2<T,blockSize,true, useWarpSerial><<<1,blockSize,blockSize*sizeof(T)>>>(g_idata,g_odata,n); 
+            else
+                reduce_kernel2<T,blockSize,false, useWarpSerial><<<1,blockSize>>>(g_idata,g_odata,n); 
+        }
+
 
 }
 template <class T, unsigned int blockSize, bool nIsPow2,bool useSM, bool useWarpSerial>
 void __forceinline__ gridBasedReduction(T *g_idata, T *g_odata, unsigned int gridSize,  unsigned int n)
 {
-
-
     void* KernelArgs[] = {(void**)&g_idata,(void**)&g_odata,(void*)&n}; 
-
-    if( useSM==true)
+    if(n>=410277.7719)
     {
-        cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,true,useWarpSerial>, gridSize,blockSize, KernelArgs,blockSize*sizeof(T),0);
-    }   
+        if( useSM==true)
+        {
+            cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,true,useWarpSerial>, gridSize,blockSize, KernelArgs,blockSize*sizeof(T),0);
+        }   
+        else
+        {
+            cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,false,useWarpSerial>, gridSize,blockSize, KernelArgs,0,0);
+        }
+    }
     else
     {
-        cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,false,useWarpSerial>, gridSize,blockSize, KernelArgs,0,0);
+        fprintf(stderr,"switch to single block\n");
+        // if( useSM==true)
+        // {
+        //     cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,true,useWarpSerial>, 1,blockSize, KernelArgs,blockSize*sizeof(T),0);
+        // }   
+        // else
+        // {
+        //     cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,false,useWarpSerial>, 1,blockSize, KernelArgs,0,0);
+        // }
+        if( useSM==true)
+        {
+            cudaLaunchCooperativeKernel((void*)reduce_kernel2<T,blockSize,true, useWarpSerial>, 1,blockSize, KernelArgs,blockSize*sizeof(T),0);
+        }   
+        else
+        {
+            cudaLaunchCooperativeKernel((void*)reduce_kernel2<T,blockSize,false, useWarpSerial>, 1,blockSize, KernelArgs,0,0);
+        }
     }
 }
 
@@ -393,7 +465,21 @@ void single_test(float& millisecond, T&gpu_result, unsigned int grid_size, unsig
 }
 
 #define my_single_test(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch) \
- single_test<type,threadcount,isPow2, useSM, useWarpSerial, useKernelLaunch>(millisecond, gpu_result, smx_count*block_per_sm,size, h_input);
+ do{\
+    double* lats=(double*)malloc(sizeof(double)*repeat);\
+    for(int i=0; i<repeat; i++)\
+    {\
+        single_test<type,threadcount,isPow2, useSM, useWarpSerial, useKernelLaunch>(millisecond, gpu_result, smx_count*block_per_sm,size, h_input);\
+        lats[i]=millisecond;\
+    }\
+    millisecond=0;\
+    for(int i=skip; i<repeat; i++)\
+    {\
+        millisecond+=lats[i];\
+    }\
+    millisecond=millisecond/(repeat-skip);\
+    free(lats);\
+    }while(0)
 
 #define switchuseSM(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch)\
     if(useSM==true){my_single_test(type,threadcount,isPow2,true,useWarpSerial,useKernelLaunch);}\
@@ -418,37 +504,82 @@ void single_test(float& millisecond, T&gpu_result, unsigned int grid_size, unsig
     switch(threadcount) \
     {\
         case 32:\
-            switchisPow2(double, 32, true, useSM,useWarpSerial,useKernelLaunch);\
+            switchisPow2(type, 32, isPow2, useSM,useWarpSerial,useKernelLaunch);\
             break;\
         case 64:\
-            switchisPow2(double, 64, true, useSM,useWarpSerial,useKernelLaunch);\
+            switchisPow2(type, 64, isPow2, useSM,useWarpSerial,useKernelLaunch);\
             break;\
         case 128:\
-            switchisPow2(double, 128, true, useSM,useWarpSerial,useKernelLaunch);\
+            switchisPow2(type, 128, isPow2, useSM,useWarpSerial,useKernelLaunch);\
             break;\
         case 256:\
-            switchisPow2(double, 256, true, useSM,useWarpSerial,useKernelLaunch);\
+            switchisPow2(type, 256, isPow2, useSM,useWarpSerial,useKernelLaunch);\
             break;\
         case 512:\
-            switchisPow2(double, 512, true, useSM,useWarpSerial,useKernelLaunch);\
+            switchisPow2(type, 512, isPow2, useSM,useWarpSerial,useKernelLaunch);\
             break;\
         case 1024:\
-            switchisPow2(double, 1024, true, useSM,useWarpSerial,useKernelLaunch);\
+            switchisPow2(type, 1024, isPow2, useSM,useWarpSerial,useKernelLaunch);\
             break;\
     }
+
+
+
+template <class T>
+void runTest(unsigned int thread_per_block, unsigned int block_per_sm,
+    unsigned int smx_count,
+    unsigned int size,
+    unsigned int repeat,
+    unsigned int skip,
+    bool useSM,
+    bool useWarpSerial,
+    bool useKernelLaunch
+    )
+{
+    float millisecond;
+    bool isPow2=false;
+    T gpu_result;
+    T* h_input = (T*)malloc(sizeof(T)*size);
+    for(int i=0; i<size; i++) 
+    {
+        h_input[i]=1;
+    }
+    double cpu_result=cpu_reduce<T>(h_input,size);
+    if(size%(thread_per_block*smx_count*2)==0)
+    { 
+        isPow2=true;
+    }
+    else
+    {
+        isPow2=false;
+    }
+    
+    switchall(T, thread_per_block, isPow2, useSM,useWarpSerial,useKernelLaunch);
+
+    fprintf(stderr,"%f-%f=%f\n",cpu_result,(double)gpu_result,cpu_result-gpu_result);   
+    printf("useSM: %d, use warp serial:%d, use kernel launch:%d, block/SM %d thread %d totalsize %d time: %f ms speed: %f GB/s\n",\
+          useSM, useWarpSerial,useKernelLaunch,\
+          block_per_sm,thread_per_block, size,\
+          (double)millisecond, (double)size*sizeof(T)/1000/1000/1000/(millisecond/1000));\
+
+  
+    free(h_input); 
+}
 
 void PrintHelp()
 {
     printf(
-            "--thread <n>:           thread per block\n \
-            --block <n>:            block per sm\n \
-            --base_array <n>:       average array per thread\n \
-            --sharememory:          use shared memory at block level reduction (default false)\n \
-            --warpserial:           use warpserial implementation (default false)\n\
-            --kernellaunch:         use kernel launch as an implicit barrier (default false)\n");
+            "--thread <n>(t):           thread per block\n \
+             --block <n>(b):            block per sm\n \
+             --base_array <n>(a):       average array per thread\n \
+             --array <n>(n):            total array size\n \
+             --repeat <n>(r):           time of experiment (larger than 2)\n \
+             --type <n>(v):             type of experiment (0:int 1:float 2:double)\n \
+             --sharememory(s):          use shared memory at block level reduction (default false)\n \
+             --warpserial(w):           use warpserial implementation (default false)\n \
+             --kernellaunch(k):         use kernel launch as an implicit barrier (default false)\n");
     exit(1);
 }
-
 
 #include <getopt.h>
 #include<iostream>
@@ -458,24 +589,29 @@ int main(int argc, char **argv)
     cudaSetDevice(0);
     cudaGetDeviceProperties(&deviceProp, 0);
     unsigned int smx_count = deviceProp.multiProcessorCount;
-    double gpu_result;
-
-    float millisecond;
-    unsigned int thread_per_block=32;
-    unsigned int block_per_sm=1;
-    unsigned int data_per_thread=4;
     
+
+    unsigned int thread_per_block=1024;
+    unsigned int block_per_sm=2;
+    unsigned int data_per_thread=4;
+    unsigned int type=0; 
+
     bool useSM=false;
     bool useWarpSerial=false;
     bool useKernelLaunch=false;
+    unsigned int size = 0;
 
-    unsigned int size = thread_per_block*smx_count*data_per_thread;
+    unsigned int repeat=11;
+    unsigned int skip=1;
 
-    const char* const short_opts = "t:b:n:swk";
+    const char* const short_opts = "t:b:a:n:r:v:swk";
     const option long_opts[] = {
             {"thread", required_argument, nullptr, 't'},
             {"block", required_argument, nullptr, 'b'},
-            {"base_array", required_argument, nullptr, 'n'},
+            {"base_array", required_argument, nullptr, 'a'},
+            {"array", required_argument, nullptr, 'n'},
+            {"repeat", required_argument, nullptr, 'r'},
+            {"type", required_argument, nullptr, 'v'},
             {"sharememory", no_argument, nullptr, 's'},
             {"warpserial", no_argument, nullptr, 'w'},
             {"kernellaunch", no_argument, nullptr, 'k'},
@@ -493,32 +629,55 @@ int main(int argc, char **argv)
         {
         case 't':
             thread_per_block = std::stoi(optarg);
-            printf("thread set to: %d\n",thread_per_block);
+            fprintf(stderr,"thread set to: %d\n",thread_per_block);
             break;
 
         case 'b':
             block_per_sm = std::stoi(optarg);
-            printf("block set to: %d\n",block_per_sm);
+            fprintf(stderr,"block set to: %d\n",block_per_sm);
+            break;
+
+        case 'a':
+            data_per_thread = std::stoi(optarg);
+            fprintf(stderr,"data per thread set to: %d\n",data_per_thread);
             break;
 
         case 'n':
-            data_per_thread = std::stoi(optarg);
-            printf("data per thread set to: %d\n",data_per_thread);
+            size = std::stoi(optarg);
+            fprintf(stderr,"array size set to: %d\n",size);
             break;
 
+        case 'r':
+            repeat = std::stoi(optarg);
+            if(repeat<=2)
+            {
+                repeat=1;
+                skip=0;
+                fprintf(stderr,"repeat set to: %d and skip 0 experiment\n",repeat);
+            }
+            else
+            {
+                fprintf(stderr,"repeat set to: %d\n",repeat);
+            }
+            break;
+        case 'v':
+            type = std::stoi(optarg);
+            type=type>=3?0:type;
+            fprintf(stderr,"type set to (0:int 1:float 2:double): %d\n",type);
+            break;
         case 's':
             useSM = true;
-            printf("useSM is set to true\n");
+            fprintf(stderr,"useSM is set to true\n");
             break;
 
         case 'w':
             useWarpSerial = true;
-            printf("useWarpSerial is set to true\n");
+            fprintf(stderr,"useWarpSerial is set to true\n");
             break;
 
         case 'k':
             useKernelLaunch = true;
-            printf("useKernelLaunch is set to true\n");
+            fprintf(stderr,"useKernelLaunch is set to true\n");
             break;
 
         default:
@@ -527,22 +686,27 @@ int main(int argc, char **argv)
         }
     }
 
-    double* h_input = (double*)malloc(sizeof(double)*size);
-    for(int i=0; i<size; i++) 
+    size = size==0?block_per_sm*thread_per_block*smx_count*data_per_thread:size;
+    switch(type)
     {
-        h_input[i]=1;
+        case 0:
+        runTest<int>(thread_per_block, block_per_sm,smx_count,
+                size,repeat,skip,
+                useSM,useWarpSerial,useKernelLaunch);
+        break;
+        case 1:
+        runTest<float>(thread_per_block, block_per_sm,smx_count,
+                size,repeat,skip,
+                useSM,useWarpSerial,useKernelLaunch);
+        break;
+        case 2:
+        runTest<double>(thread_per_block, block_per_sm,smx_count,
+                size,repeat,skip,
+                useSM,useWarpSerial,useKernelLaunch);
+        break;
+
     }
-    double cpu_result=cpu_reduce(h_input,size);
-
-    switchall(thread_per_block, 32, true, useSM,useWarpSerial,useKernelLaunch);
-    
-    printf("%f-%f=%f\n",cpu_result,gpu_result,cpu_result-gpu_result);   
-    printf("block/SM %d thread %d totalsize %d time: %f ms speed: %f GB/s\n",\
-          1,thread_per_block, size,\
-          (double)millisecond, (double)size*sizeof(double)/1000/1000/1000/(millisecond/1000));\
-
-  
-    free(h_input);
+    // free(h_input);
 
  }
 
