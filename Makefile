@@ -1,19 +1,14 @@
 
-CUSOURCE= block_reduction.cu warp_reduction.cu bandwidth.cu
-CUOBJS=$(CUSOURCE:.cu=.o)
+EXECUTABLE=mgrid
 
-EXECUTABLE=warp block band 
+#set use Event to use Event Clock
+CODEFLAG=-gencode=arch=compute_60,code=sm_60 -gencode=arch=compute_70,code=sm_70 
 
 all: $(EXECUTABLE) 
 
-band: bandwidth.cu
-	nvcc -arch sm_60 -O3 -o $@ $^
 
-warp: warp_reduction.cu
-	nvcc -arch sm_60 -O3 -o $@ $^
-
-block: block_reduction.cu
-	nvcc -arch sm_60 -O3 -o $@ $^
+mgrid: $(CUOBJS) $(COBJS) mgrid_reduction.cu
+	nvcc $(CODEFLAG) -std=c++11 -rdc=true -o $@ $^
 
 clean:
-		rm $(EXECUTABLE)
+	rm  $(EXECUTABLE) 
