@@ -401,7 +401,118 @@ void __forceinline__ gridBasedReduction(T *g_idata, T *g_odata, unsigned int gri
             cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,false,useWarpSerial>, gridSize,blockSize, KernelArgs,0,0);
         }
     }
+}
 
+//though there are no peer access in single gpu. I set it as CAN peer access here.
+void getAceessMatrix(unsigned int *access, unsigned int gpu_count)
+{
+    for(int s=0; s<gpu_count; s++)
+    {
+        cudaSetDevice(s);
+        access[s*gpu_count+s]=1;
+        for(int d=s+1; d<gpu_count; d++)
+        {
+            int l_access = 0;
+            cudaDeviceCanAccessPeer(&l_access, s, d);
+            if (l_access) {
+                cudaDeviceEnablePeerAccess(d, 0);
+                cudaCheckError();
+                cudaSetDevice(d);
+                cudaDeviceEnablePeerAccess(s, 0);
+                cudaSetDevice(s);
+                cudaCheckError();
+            }
+            access[s*gpu_count+d]=l_access;      
+            access[d*gpu_count+s]=l_access;      
+        }
+    }
+}
+
+
+
+// int main()
+// {
+//     int numGPUs;
+//     cudaGetDeviceCount(&numGPUs);
+//     unsigned int * access=(unsigned int *)malloc(sizeof(unsigned int)*numGPUs*numGPUs);
+//     getAceessMatrix(access, numGPUs);
+//     for(int i=0; i<numGPUs; i++)
+//     {
+//         for(int j=0; j<numGPUs; j++)
+//         {
+//             printf("%d\t",access[i*numGPUs+j]);
+//         }
+//         printf("\n");
+//     }
+// }
+
+template<class T>
+void basic_transfer(T**g_idata, T*g_odata, unsigned int size_gpu, unsigned int gpu_count, cudaStream_t *mstream)
+{
+    for(int deviceid=0; deviceid<gpu_count;deviceid++)
+    {
+            // cudaSetDevice(deviceid);
+        cudaMemcpyPeerAsync(g_odata+deviceid*size_gpu, 0, g_idata[deviceid], deviceid, size_gpu*sizeof(T), mstream[deviceid]);
+            // cudaMemcpyAsync(g_odata+deviceid*size_gpu, g_idata[deviceid], size_gpu*sizeof(T), cudaMemcpyDeviceToDevice, mstream[deviceid]);
+        cudaCheckError();
+    }
+}
+
+template<class T>
+void basic_transfer_alter
+    (   T****source_ptr, T**** destinate_ptr, //[step][source][destinate]*
+        unsigned int ***size,//[step][source gpu][destinate gpu]
+        // unsigned int ***size,//[step][source gpu][destinate gpu]
+        unsigned int gpu_count,
+        unsigned int steps,
+        cudaStream_t *mstream)//for synchronization from source
+{
+    for(unsigned int step=0; step<steps; step++)
+    {
+        //async transfer
+        if(step>1)
+        {
+            for(unsigned int src_gpu=0; src_gpu<gpu_count; src_gpu++)
+            {
+                cudaSetDevice(src_gpu);
+                for(int dst_gpu=0; dst_gpu<gpu_count; dst_gpu++)
+                {
+                    if(size[step-1][src_gpu][dst_gpu]==0)continue;
+                    cudaStreamSynchronize(mstream[src_gpu]);
+                    break;
+                }
+            }
+        }
+
+        for(unsigned int src_gpu=0; src_gpu<gpu_count; src_gpu++)
+        {
+            // cudaSetDevice(src_gpu);
+            for(int dst_gpu=0; dst_gpu<gpu_count; dst_gpu++)
+            {
+                if(size[step][src_gpu][dst_gpu]==0)continue;
+                cudaMemcpyPeer(destinate_ptr[step][src_gpu][dst_gpu], dst_gpu, source_ptr[step][src_gpu][dst_gpu], src_gpu, size[step][src_gpu][dst_gpu]);
+            }
+            cudaCheckError();
+        }
+    }
+
+    for(unsigned int src_gpu=0; src_gpu<gpu_count; src_gpu++)
+    {
+        cudaSetDevice(src_gpu);
+        cudaStreamSynchronize(mstream[src_gpu]);
+    }
+}
+
+template<class T>
+void mc_transfer(T**g_idata, T*g_odata, unsigned int size_gpu, unsigned int gpu_count, cudaStream_t *mstream)
+{
+    for(int deviceid=0; deviceid<gpu_count;deviceid++)
+    {
+            // cudaSetDevice(deviceid);
+        // cudaMemcpyPeerAsync(g_odata+deviceid*size_gpu, 0, g_idata[deviceid], deviceid, size_gpu*sizeof(T), mstream[deviceid]);
+        cudaMemcpyAsync(g_odata+deviceid*size_gpu, g_idata[deviceid], size_gpu*sizeof(T), cudaMemcpyDeviceToDevice, mstream[deviceid]);
+        cudaCheckError();
+    }
 }
 
 template <class T, unsigned int blockSize, bool nIsPow2,bool useSM, bool useWarpSerial>
@@ -435,29 +546,63 @@ void __forceinline__ launchMultiKernelBasedReduction(double&millisecond, T **g_i
             launchParamsList[deviceid].args=packedKernelArgs[deviceid];
         }
         cudaCheckError();
+        unsigned int size_gpu=blockSize*gridSize;
+        //initialize transfer strategy
+        unsigned int step=1;
+
+        T**** source_ptr=(T****)malloc(sizeof(T***)*step);
+        T**** destinate_ptr=(T****)malloc(sizeof(T***)*step);
+        // unsigned int size[1][2][2];
+        unsigned int ***size=(unsigned int***)malloc(sizeof(unsigned int**)*step);
+        for(int s=0; s<step; s++)
+        {
+            source_ptr[s]=(T***)malloc(sizeof(T**)*gpu_count);
+            destinate_ptr[s]=(T***)malloc(sizeof(T**)*gpu_count);
+            size[s]=(unsigned int **)malloc(sizeof(unsigned int *)*gpu_count);
+            for(int src_gpu=0; src_gpu<gpu_count; src_gpu++)
+            {
+                source_ptr[s][src_gpu]=(T**)malloc(sizeof(T*)*gpu_count);
+                destinate_ptr[s][src_gpu]=(T**)malloc(sizeof(T*)*gpu_count);
+                size[s][src_gpu]=(unsigned int *)malloc(sizeof(unsigned int )*gpu_count);
+                for(int dst_gpu=0; dst_gpu<gpu_count; dst_gpu++)
+                {
+                    source_ptr[s][src_gpu][dst_gpu]=NULL;
+                    destinate_ptr[s][src_gpu][dst_gpu]=NULL;
+                    size[s][src_gpu][dst_gpu]=0;
+                }
+            }
+        }
+
+        size[0][0][0]=size_gpu;
+        source_ptr[0][0][0]=g_idata[0];
+        destinate_ptr[0][0][0]=g_odata;
+
+        size[0][1][0]=size_gpu;
+        source_ptr[0][1][0]=g_idata[1];
+        destinate_ptr[0][1][0]=g_odata+size_gpu;
 
         //compute time
         /************************************/
         clock_gettime(CLOCK_REALTIME, &tsstart);
 
         cudaLaunchCooperativeKernelMultiDevice(launchParamsList, gpu_count);
-        unsigned int size_gpu=blockSize*gridSize;
+        
 
         //data transfer
-        for(int deviceid=0; deviceid<gpu_count;deviceid++)
-        {
-            // cudaSetDevice(deviceid);
-            cudaMemcpyPeerAsync(g_odata+deviceid*size_gpu, 0, g_idata[deviceid], deviceid, size_gpu*sizeof(T), mstream[deviceid]);
-            // cudaMemcpyAsync(g_odata+deviceid*size_gpu, g_idata[deviceid], size_gpu*sizeof(T), cudaMemcpyDeviceToDevice, mstream[deviceid]);
-            cudaCheckError();
-        }
-        cudaSetDevice(0);
-        for(int deviceid=0; deviceid<gpu_count;deviceid++)
-        {
-            cudaSetDevice(deviceid);
-            cudaDeviceSynchronize();
-            cudaCheckError();
-        }
+        // mc_transfer<T>(g_idata, g_odata, size_gpu, gpu_count, mstream);
+        basic_transfer_alter<T>(
+            source_ptr, destinate_ptr, size,
+            gpu_count,
+            step,
+            mstream);
+        
+        // cudaSetDevice(0);
+        // for(int deviceid=0; deviceid<gpu_count;deviceid++)
+        // {
+        //     cudaSetDevice(deviceid);
+        //     cudaDeviceSynchronize();
+        //     cudaCheckError();
+        // }
 
         //last compute
         cudaSetDevice(0);
@@ -484,6 +629,19 @@ void __forceinline__ launchMultiKernelBasedReduction(double&millisecond, T **g_i
         free(mstream);
         free(packedKernelArgs);
         free(launchParamsList);
+
+        for(int s=0; s<step; s++)
+        {
+            for(int src_gpu=0; src_gpu<gpu_count; src_gpu++)
+            {
+                free(source_ptr[s][src_gpu]);
+                free(destinate_ptr[s][src_gpu]);
+                free(size[s][src_gpu]);       
+            }
+            free(source_ptr[s]);
+            free(destinate_ptr[s]);
+            free(size[s]);
+        }
 }
 
 template<class T, unsigned int blockSize, bool nIsPow2,bool useSM, bool useWarpSerial, bool useKernelLaunch>
