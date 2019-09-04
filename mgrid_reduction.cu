@@ -17,7 +17,6 @@
 
 #include <stdio.h>
 #include <cooperative_groups.h>
-#include "repeat.h"
 namespace cg = cooperative_groups;
 
 #define cudaCheckError() {                                          \
@@ -595,7 +594,7 @@ void __forceinline__ launchMultiKernelBasedReduction(double&millisecond, T **g_i
             gpu_count,
             step,
             mstream);
-        
+
         // cudaSetDevice(0);
         // for(int deviceid=0; deviceid<gpu_count;deviceid++)
         // {
