@@ -471,6 +471,7 @@ __global__ void dev_print(double*arr, unsigned int size)
 		}
 	}
 }
+#include<omp.h>
 template<class T>
 void basic_transfer_alter
     (   T****source_ptr, T**** destinate_ptr, //[step][source][destinate]*
@@ -480,33 +481,33 @@ void basic_transfer_alter
         unsigned int steps,
         cudaStream_t *mstream)//for synchronization from source
 {
+#pragma parallel num_thread(gpu_count)
     for(unsigned int step=0; step<steps; step++)
     {
         //async transfer
-        if(step>=1)
+#pragma omp for
+        for(unsigned int l_gpu=0; l_gpu<gpu_count; l_gpu++)
         {
-            for(unsigned int src_gpu=0; src_gpu<gpu_count; src_gpu++)
-            {
-                cudaSetDevice(src_gpu);
-                for(int dst_gpu=0; dst_gpu<gpu_count; dst_gpu++)
-                {
-                    if(size[step-1][src_gpu][dst_gpu]==0)continue;
-                    cudaStreamSynchronize(mstream[src_gpu]);
-                    break;
-                }
-            }
-            cudaCheckError();
-        }
-
-        for(unsigned int src_gpu=0; src_gpu<gpu_count; src_gpu++)
-        {
+		//synchronize previous step
+        	if(step>=1)
+        	{
+		    	unsigned int dst_gpu=l_gpu;
+            		for(unsigned int src_gpu=0; src_gpu<gpu_count; src_gpu++)
+            		{
+                    		if(size[step-1][src_gpu][dst_gpu]==0)continue;
+                		cudaSetDevice(src_gpu);
+                    		cudaStreamSynchronize(mstream[src_gpu]);;
+                	}
+            	}
+		unsigned int src_gpu=l_gpu;
             for(int dst_gpu=0; dst_gpu<gpu_count; dst_gpu++)
             {
                 if(size[step][src_gpu][dst_gpu]==0)continue;
 		cudaMemcpyPeerAsync(destinate_ptr[step][src_gpu][dst_gpu], dst_gpu, source_ptr[step][src_gpu][dst_gpu], src_gpu, sizeof(T)*size[step][src_gpu][dst_gpu],mstream[src_gpu]);
             }
             cudaCheckError();
-        }
+	}
+#pragma omp barrier
     }
 
     for(unsigned int src_gpu=0; src_gpu<gpu_count; src_gpu++)
@@ -807,6 +808,8 @@ int main()
     }
     unsigned int gpu_count=8;
     // switchall(T, thread_per_block, isPow2, useSM,useWarpSerial,useKernelLaunch);
+    unsigned int access[64];
+    getAceessMatrix(access, 8);
     my_single_test(double,1024,true,false,true,true,gpu_count);
 
     fprintf(stderr,"%f-%f=%f\n",cpu_result,(double)gpu_result,cpu_result*gpu_count-gpu_result);   
