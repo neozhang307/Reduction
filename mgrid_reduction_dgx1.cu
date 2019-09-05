@@ -151,8 +151,11 @@ blockSize is the size of a block
 
         // ensure we don't read out of bounds -- this is optimized away for powerOf2 sized arrays
         if (nIsPow2 || i + blockSize < n)
-            mySum += idata[i+blockSize];
-
+	{ 
+		//printf("execute %f,",mySum);
+     		mySum += idata[i+blockSize];
+		//printf("execute %f\n,",mySum);
+	}
         i += gridSizeMul2;
     }
     return mySum; 
@@ -457,7 +460,17 @@ void basic_transfer(T**g_idata, T*g_odata, unsigned int size_gpu, unsigned int g
         cudaCheckError();
     }
 }
-
+__global__ void dev_print(double*arr, unsigned int size)
+{
+	unsigned int tid=threadIdx.x;
+	if(tid==0)
+	{
+		for(int i=0; i<size; i++)
+		{
+			printf("%f ",arr[i]);
+		}
+	}
+}
 template<class T>
 void basic_transfer_alter
     (   T****source_ptr, T**** destinate_ptr, //[step][source][destinate]*
@@ -470,7 +483,7 @@ void basic_transfer_alter
     for(unsigned int step=0; step<steps; step++)
     {
         //async transfer
-        if(step>1)
+        if(step>=1)
         {
             for(unsigned int src_gpu=0; src_gpu<gpu_count; src_gpu++)
             {
@@ -482,15 +495,15 @@ void basic_transfer_alter
                     break;
                 }
             }
+            cudaCheckError();
         }
 
         for(unsigned int src_gpu=0; src_gpu<gpu_count; src_gpu++)
         {
-            // cudaSetDevice(src_gpu);
             for(int dst_gpu=0; dst_gpu<gpu_count; dst_gpu++)
             {
                 if(size[step][src_gpu][dst_gpu]==0)continue;
-                cudaMemcpyPeer(destinate_ptr[step][src_gpu][dst_gpu], dst_gpu, source_ptr[step][src_gpu][dst_gpu], src_gpu, size[step][src_gpu][dst_gpu]);
+		cudaMemcpyPeerAsync(destinate_ptr[step][src_gpu][dst_gpu], dst_gpu, source_ptr[step][src_gpu][dst_gpu], src_gpu, sizeof(T)*size[step][src_gpu][dst_gpu],mstream[src_gpu]);
             }
             cudaCheckError();
         }
@@ -500,6 +513,7 @@ void basic_transfer_alter
     {
         cudaSetDevice(src_gpu);
         cudaStreamSynchronize(mstream[src_gpu]);
+       // cudaDeviceSynchronize();
     }
 }
 
@@ -516,7 +530,7 @@ void mc_transfer(T**g_idata, T*g_odata, unsigned int size_gpu, unsigned int gpu_
 }
 
 template <class T, unsigned int blockSize, bool nIsPow2,bool useSM, bool useWarpSerial>
-void __forceinline__ launchMultiKernelBasedReduction(double&millisecond, T **g_idata, T *g_odata, unsigned int gridSize,  unsigned int data_per_gpu, unsigned int gpu_count=1)
+void __forceinline__ launchMultiKernelBasedReduction(double&millisecond, T **g_idata, T **g_tdata, T *g_odata, unsigned int gridSize,  unsigned int data_per_gpu, unsigned int gpu_count=1)
 {  
 
         cudaStream_t *mstream = (cudaStream_t*)malloc(sizeof(cudaStream_t)*gpu_count);
@@ -534,7 +548,7 @@ void __forceinline__ launchMultiKernelBasedReduction(double&millisecond, T **g_i
             cudaSetDevice(deviceid);
             packedKernelArgs[deviceid]=(void**)malloc(sizeof(void*)*3);
             packedKernelArgs[deviceid][0]=(void*)&g_idata[deviceid];
-            packedKernelArgs[deviceid][1]=(void*)&g_idata[deviceid];
+            packedKernelArgs[deviceid][1]=(void*)&g_tdata[deviceid];
             packedKernelArgs[deviceid][2]=(void*)&data_per_gpu;
             cudaStreamCreate(&mstream[deviceid]);
             
@@ -548,7 +562,7 @@ void __forceinline__ launchMultiKernelBasedReduction(double&millisecond, T **g_i
         cudaCheckError();
         unsigned int size_gpu=blockSize*gridSize;
         //initialize transfer strategy
-        unsigned int step=1;
+        unsigned int step=2;
 
         T**** source_ptr=(T****)malloc(sizeof(T***)*step);
         T**** destinate_ptr=(T****)malloc(sizeof(T***)*step);
@@ -572,30 +586,61 @@ void __forceinline__ launchMultiKernelBasedReduction(double&millisecond, T **g_i
                 }
             }
         }
+	//0,1,2,3 -> 0 4,5,6,7->4
+	for(int i=0; i<4; i++)
+	{
+        	size[0][i][0]=size_gpu;
+        	source_ptr[0][i][0]=g_tdata[i];
+        	destinate_ptr[0][i][0]=g_odata+i*size_gpu;
+	}
+	cudaSetDevice(4);
+	T* tmp_ptr_4g;
+	cudaMalloc((void**)&tmp_ptr_4g, sizeof(T)*4*size_gpu);
+	for(int i=0; i<4; i++)
+	{
+        	size[0][i+4][4]=size_gpu;
+        	source_ptr[0][i+4][4]=g_tdata[i+4];
+        	destinate_ptr[0][i+4][4]=tmp_ptr_4g+i*size_gpu;
+	}
+	//4->0
 
-        size[0][0][0]=size_gpu;
-        source_ptr[0][0][0]=g_idata[0];
-        destinate_ptr[0][0][0]=g_odata;
-
-        size[0][1][0]=size_gpu;
-        source_ptr[0][1][0]=g_idata[1];
-        destinate_ptr[0][1][0]=g_odata+size_gpu;
-
+       	size[1][4][0]=size_gpu*4;
+      	source_ptr[1][4][0]=tmp_ptr_4g;
+       	destinate_ptr[1][4][0]=g_odata+4*size_gpu;
+	
         //compute time
         /************************************/
         clock_gettime(CLOCK_REALTIME, &tsstart);
 
         cudaLaunchCooperativeKernelMultiDevice(launchParamsList, gpu_count);
-        
-
+	//for(int dev=0; dev<gpu_count; dev++)
+	//{
+//		cudaSetDevice(dev);
+//		reduce_kernel1<T,nIsPow2><<<gridSize,blockSize,0,mstream[dev]>>>(g_idata[dev],g_idata[dev],data_per_gpu);
+//	}
+        for(int i=0; i<gpu_count; i++)
+	{
+		cudaSetDevice(i);
+		cudaDeviceSynchronize();
+		cudaStreamSynchronize(mstream[i]);
+		T* just=(T*)malloc(sizeof(T)*size_gpu*2);
+		cudaMemcpy(just,g_tdata[i],sizeof(T)*size_gpu*2,cudaMemcpyDeviceToHost);
+		//printf("middle of %d in gpu %d:%f\n",size_gpu,i,cpu_reduce<T>(just,size_gpu*2));
+		free(just);
+	}
         //data transfer
-        // mc_transfer<T>(g_idata, g_odata, size_gpu, gpu_count, mstream);
+        // mc_transfer<T>(g_idata, g_odata, size_gpu, gpu_count, mstream);*2
         basic_transfer_alter<T>(
             source_ptr, destinate_ptr, size,
             gpu_count,
             step,
             mstream);
-        
+	//T* just=(T*)malloc(sizeof(T)*size_gpu*gpu_count);
+	//cudaMemcpy(just,g_odata,sizeof(T)*size_gpu*gpu_count,cudaMemcpyDeviceToHost);
+	//printf("middle of %d:%f\n",size_gpu*4,cpu_reduce<T>(just,size_gpu*4));
+	//printf("middle of %d:%f\n",size_gpu*gpu_count,cpu_reduce<T>(just,size_gpu*gpu_count));
+	//free(just);
+
         // cudaSetDevice(0);
         // for(int deviceid=0; deviceid<gpu_count;deviceid++)
         // {
@@ -649,19 +694,21 @@ void single_test(double& millisecond, T&gpu_result, unsigned int gridSize, unsig
 {   
     cudaSetDevice(0);
     unsigned int size_gpu=blockSize*gridSize;
-    unsigned int l_array_size=g_array_size>size_gpu?g_array_size:size_gpu;
+    unsigned int l_array_size=g_array_size>size_gpu*2?g_array_size:size_gpu*2;
     T* h_output = (T*)malloc(sizeof(T)*size_gpu*gpu_count); 
     T** d_input = (T**)malloc(sizeof(T*)*gpu_count); 
+    T** d_tmp = (T**)malloc(sizeof(T*)*gpu_count); 
     T* d_output; 
     
 
 
     for(int deviceid=0; deviceid<gpu_count; deviceid++)
     {
-        printf("here is devide %d\n",deviceid);
+        //printf("here is devide %d\n",deviceid);
 	cudaSetDevice(deviceid);
     	cudaCheckError();
         cudaMalloc((void**)&d_input[deviceid], sizeof(T)*l_array_size); 
+        cudaMalloc((void**)&d_tmp[deviceid], sizeof(T)*l_array_size); 
         cudaMemcpy(d_input[deviceid], h_input, sizeof(T)*g_array_size, cudaMemcpyHostToDevice); 
     }
     cudaSetDevice(0);
@@ -671,7 +718,7 @@ void single_test(double& millisecond, T&gpu_result, unsigned int gridSize, unsig
     
     cudaCheckError();
 
-    launchMultiKernelBasedReduction<T, blockSize,true,useSM,useWarpSerial>(millisecond, d_input, d_output, gridSize,  l_array_size, gpu_count);
+    launchMultiKernelBasedReduction<T, blockSize,true,useSM,useWarpSerial>(millisecond, d_input, d_tmp, d_output, gridSize,  l_array_size, gpu_count);
     cudaCheckError();
 
     
@@ -692,8 +739,10 @@ void single_test(double& millisecond, T&gpu_result, unsigned int gridSize, unsig
     {
         cudaSetDevice(deviceid);
         cudaFree(d_input[deviceid]);
+        cudaFree(d_tmp[deviceid]);
     }
     free(d_input);
+    free(d_tmp);
     cudaFree(d_output);
 }
 
@@ -727,11 +776,11 @@ int main()
     unsigned int smx_count = deviceProp.multiProcessorCount;
 
     unsigned int thread_per_block=1024;
-    unsigned int block_per_sm=2;
-    unsigned int data_per_thread=4;
+    unsigned int block_per_sm=1;
+    unsigned int data_per_thread=2;
     unsigned int type=0; 
 
-    unsigned int size=data_per_thread*thread_per_block*block_per_sm;
+    unsigned int size=data_per_thread*thread_per_block*block_per_sm*smx_count;
 
     unsigned int repeat=1;
     unsigned int skip=0;
