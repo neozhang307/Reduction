@@ -294,6 +294,77 @@ value index larger than n should be setted to 0 in advance;
     }
 }
 
+template <class T, unsigned int blockSize, bool nIsPow2, bool useSM, bool useWarpSerial>
+__global__ void
+reduce_mgrid(T**source_ptr, //[step]src pointer
+    T** destinate_ptr, //[step]pointer
+    unsigned int *g_size,//[step] current steps 
+    unsigned int totalsteps//,//step to finish transportation
+   // unsigned int gpuid//for last step
+    )
+/*
+size of g_odata no smaller than n; equal to the multiply of blockSize; 
+value index larger than n should be setted to 0 in advance;
+*/
+{
+    // Handle to thread block group
+    cg::thread_block cta = cg::this_thread_block();
+    cg::grid_group gg = cg::this_grid();
+    cg::multi_grid_group mgg=cg::this_multi_grid();
+    T (* block_reduction) (T, T*, cg::thread_block cta); 
+    if(useWarpSerial==true)
+    {
+        block_reduction=block_reduce_warpserial<T, blockSize>;
+    }
+    else
+    {
+        block_reduction=block_reduce_cuda_sample_opt<T, blockSize>;
+    }
+
+    T  mySum = 0;
+    int step=0;
+    unsigned int size;
+    for(; step<totalsteps; step++)
+    {
+        size=g_size[step];
+        if(size!=0)
+        {
+            // printf("%d:%d\n",gg.thread_rank(),size);
+            T *g_idata=source_ptr[step];
+            T *g_odata=destinate_ptr[step];
+
+            mySum = serial_reduce<T,nIsPow2>(size, 
+                threadIdx.x, blockIdx.x,
+                blockDim.x, blockDim.x*gridDim.x*2,
+                    g_idata);
+            g_odata[gg.thread_rank()] = mySum;
+        }
+        mgg.sync();
+    }
+            // write result for this block to global mem
+    size=g_size[step];
+    if(size!=0)
+    {
+        if(blockIdx.x==0)
+        {
+            T* sdata;
+            T *g_idata=source_ptr[step];
+            T *g_odata=destinate_ptr[step];
+
+            if(useSM==true)
+                sdata=SharedMemory<T>();
+            else
+                sdata=g_odata;
+
+            mySum = serial_reduce_final<T,blockSize>(size, 
+                        threadIdx.x,
+                        g_idata);
+
+            mySum=block_reduction(mySum, sdata, cta);
+            if (threadIdx.x == 0) g_odata[blockIdx.x] = mySum;
+        }
+    }
+}
 
 template <class T, bool nIsPow2>
 __global__ void
@@ -433,21 +504,18 @@ void getAceessMatrix(unsigned int *access, unsigned int gpu_count)
 
 
 
-// int main()
-// {
-//     int numGPUs;
-//     cudaGetDeviceCount(&numGPUs);
-//     unsigned int * access=(unsigned int *)malloc(sizeof(unsigned int)*numGPUs*numGPUs);
-//     getAceessMatrix(access, numGPUs);
-//     for(int i=0; i<numGPUs; i++)
-//     {
-//         for(int j=0; j<numGPUs; j++)
-//         {
-//             printf("%d\t",access[i*numGPUs+j]);
-//         }
-//         printf("\n");
-//     }
-// }
+
+__global__ void dev_print(double*arr, unsigned int size)
+{
+    unsigned int tid=threadIdx.x;
+    if(tid==0)
+    {
+        for(int i=0; i<size; i++)
+        {
+            printf("%f ",arr[i]);
+        }
+    }
+}
 
 template<class T>
 void basic_transfer(T**g_idata, T*g_odata, unsigned int size_gpu, unsigned int gpu_count, cudaStream_t *mstream)
@@ -460,17 +528,43 @@ void basic_transfer(T**g_idata, T*g_odata, unsigned int size_gpu, unsigned int g
         cudaCheckError();
     }
 }
-__global__ void dev_print(double*arr, unsigned int size)
+
+
+void __forceinline__  sync_last_step(unsigned int ***size,unsigned int l_gpu, unsigned int gpu_count,
+                                unsigned int step,
+                                cudaStream_t *mstream 
+                                )
 {
-	unsigned int tid=threadIdx.x;
-	if(tid==0)
-	{
-		for(int i=0; i<size; i++)
-		{
-			printf("%f ",arr[i]);
-		}
-	}
+    if(step>=1)
+    {
+        unsigned int dst_gpu=l_gpu;
+        for(unsigned int src_gpu=0; src_gpu<gpu_count; src_gpu++)
+        {
+            if(size[step-1][src_gpu][dst_gpu]==0)continue;
+            cudaSetDevice(src_gpu);
+            cudaStreamSynchronize(mstream[src_gpu]);;
+        }
+    }
 }
+
+template<class T>
+unsigned int __forceinline__ single_step_transfer(
+                                T****source_ptr, T**** destinate_ptr,unsigned int ***size,
+                                unsigned int l_gpu, unsigned int gpu_count,
+                                unsigned int step,
+                                cudaStream_t *mstream 
+                                )
+{
+    unsigned int src_gpu=l_gpu;
+    for(int dst_gpu=0; dst_gpu<gpu_count; dst_gpu++)
+    {
+        if(size[step][src_gpu][dst_gpu]==0)continue;
+        cudaMemcpyPeerAsync(destinate_ptr[step][src_gpu][dst_gpu], dst_gpu, source_ptr[step][src_gpu][dst_gpu], src_gpu, sizeof(T)*size[step][src_gpu][dst_gpu],mstream[src_gpu]);
+    }
+    cudaCheckError();
+    return step+1;
+}
+#include<unistd.h>
 #include<omp.h>
 template<class T>
 void basic_transfer_alter
@@ -488,33 +582,15 @@ void basic_transfer_alter
 #pragma omp for
         for(unsigned int l_gpu=0; l_gpu<gpu_count; l_gpu++)
         {
-		//synchronize previous step
-        	if(step>=1)
-        	{
-		    	unsigned int dst_gpu=l_gpu;
-            		for(unsigned int src_gpu=0; src_gpu<gpu_count; src_gpu++)
-            		{
-                    		if(size[step-1][src_gpu][dst_gpu]==0)continue;
-                		cudaSetDevice(src_gpu);
-                    		cudaStreamSynchronize(mstream[src_gpu]);;
-                	}
-            	}
-		unsigned int src_gpu=l_gpu;
-            for(int dst_gpu=0; dst_gpu<gpu_count; dst_gpu++)
-            {
-                if(size[step][src_gpu][dst_gpu]==0)continue;
-		cudaMemcpyPeerAsync(destinate_ptr[step][src_gpu][dst_gpu], dst_gpu, source_ptr[step][src_gpu][dst_gpu], src_gpu, sizeof(T)*size[step][src_gpu][dst_gpu],mstream[src_gpu]);
-            }
-            cudaCheckError();
-	}
+        //synchronize previous step
+            single_step_transfer<T>(source_ptr,destinate_ptr,size,l_gpu,gpu_count,step,mstream);
+        }
 #pragma omp barrier
     }
-
     for(unsigned int src_gpu=0; src_gpu<gpu_count; src_gpu++)
     {
         cudaSetDevice(src_gpu);
         cudaStreamSynchronize(mstream[src_gpu]);
-       // cudaDeviceSynchronize();
     }
 }
 
@@ -529,7 +605,7 @@ void mc_transfer(T**g_idata, T*g_odata, unsigned int size_gpu, unsigned int gpu_
         cudaCheckError();
     }
 }
-
+//omp
 template <class T, unsigned int blockSize, bool nIsPow2,bool useSM, bool useWarpSerial>
 void __forceinline__ launchMultiKernelBasedReduction(double&millisecond, T **g_idata, T **g_tdata, T *g_odata, unsigned int gridSize,  unsigned int data_per_gpu, unsigned int gpu_count=1)
 {  
@@ -563,13 +639,13 @@ void __forceinline__ launchMultiKernelBasedReduction(double&millisecond, T **g_i
         cudaCheckError();
         unsigned int size_gpu=blockSize*gridSize;
         //initialize transfer strategy
-        unsigned int step=2;
+        unsigned int totalsteps=2;
 
-        T**** source_ptr=(T****)malloc(sizeof(T***)*step);
-        T**** destinate_ptr=(T****)malloc(sizeof(T***)*step);
+        T**** source_ptr=(T****)malloc(sizeof(T***)*totalsteps);
+        T**** destinate_ptr=(T****)malloc(sizeof(T***)*totalsteps);
         // unsigned int size[1][2][2];
-        unsigned int ***size=(unsigned int***)malloc(sizeof(unsigned int**)*step);
-        for(int s=0; s<step; s++)
+        unsigned int ***size=(unsigned int***)malloc(sizeof(unsigned int**)*totalsteps);
+        for(int s=0; s<totalsteps; s++)
         {
             source_ptr[s]=(T***)malloc(sizeof(T**)*gpu_count);
             destinate_ptr[s]=(T***)malloc(sizeof(T**)*gpu_count);
@@ -613,47 +689,28 @@ void __forceinline__ launchMultiKernelBasedReduction(double&millisecond, T **g_i
         /************************************/
         clock_gettime(CLOCK_REALTIME, &tsstart);
 
-        cudaLaunchCooperativeKernelMultiDevice(launchParamsList, gpu_count);
-	//for(int dev=0; dev<gpu_count; dev++)
-	//{
-//		cudaSetDevice(dev);
-//		reduce_kernel1<T,nIsPow2><<<gridSize,blockSize,0,mstream[dev]>>>(g_idata[dev],g_idata[dev],data_per_gpu);
-//	}
-        for(int i=0; i<gpu_count; i++)
-	{
-		cudaSetDevice(i);
-		cudaDeviceSynchronize();
-		cudaStreamSynchronize(mstream[i]);
-		T* just=(T*)malloc(sizeof(T)*size_gpu*2);
-		cudaMemcpy(just,g_tdata[i],sizeof(T)*size_gpu*2,cudaMemcpyDeviceToHost);
-		//printf("middle of %d in gpu %d:%f\n",size_gpu,i,cpu_reduce<T>(just,size_gpu*2));
-		free(just);
-	}
-        //data transfer
-        // mc_transfer<T>(g_idata, g_odata, size_gpu, gpu_count, mstream);*2
-        basic_transfer_alter<T>(
-            source_ptr, destinate_ptr, size,
-            gpu_count,
-            step,
-            mstream);
-	//T* just=(T*)malloc(sizeof(T)*size_gpu*gpu_count);
-	//cudaMemcpy(just,g_odata,sizeof(T)*size_gpu*gpu_count,cudaMemcpyDeviceToHost);
-	//printf("middle of %d:%f\n",size_gpu*4,cpu_reduce<T>(just,size_gpu*4));
-	//printf("middle of %d:%f\n",size_gpu*gpu_count,cpu_reduce<T>(just,size_gpu*gpu_count));
-	//free(just);
+    #pragma omp parallel num_threads(gpu_count)
+        {
+            unsigned int tid=omp_get_thread_num() ;
+            cudaSetDevice(tid);
+            {
+                // cudaLaunchCooperativeKernel((void*)reduce_kernel1<T,nIsPow2>, gridSize, blockSize, packedKernelArgs[tid],0,mstream[tid]);
+                reduce_kernel1<T, nIsPow2><<<gridSize,blockSize>>>(g_idata[tid],g_tdata[tid],data_per_gpu); 
+            }
+            for(unsigned int step=0; step<totalsteps; step++)
+            {
+                sync_last_step(size,tid,gpu_count,step,mstream);
+                single_step_transfer<T>(source_ptr,destinate_ptr,size,tid,gpu_count,step,mstream);
+    #pragma omp barrier
+            }
+            if(tid==0)
+            {
+                sync_last_step(size,tid,gpu_count,totalsteps,mstream);
+                launchKernelBasedReduction<T,blockSize,true,useSM,useWarpSerial>(g_odata,g_odata,gridSize,size_gpu*gpu_count);
+                cudaDeviceSynchronize();
+            }
+        }
 
-        // cudaSetDevice(0);
-        // for(int deviceid=0; deviceid<gpu_count;deviceid++)
-        // {
-        //     cudaSetDevice(deviceid);
-        //     cudaDeviceSynchronize();
-        //     cudaCheckError();
-        // }
-
-        //last compute
-        cudaSetDevice(0);
-        launchKernelBasedReduction<T,blockSize,true,useSM,useWarpSerial>(g_odata,g_odata,gridSize,size_gpu*gpu_count);
-        cudaDeviceSynchronize();
         clock_gettime(CLOCK_REALTIME, &tsend);
         /************************************/
         time_elapsed_ns = (tsend.tv_nsec-tsstart.tv_nsec);
@@ -676,7 +733,7 @@ void __forceinline__ launchMultiKernelBasedReduction(double&millisecond, T **g_i
         free(packedKernelArgs);
         free(launchParamsList);
 
-        for(int s=0; s<step; s++)
+        for(int s=0; s<totalsteps; s++)
         {
             for(int src_gpu=0; src_gpu<gpu_count; src_gpu++)
             {
@@ -689,6 +746,158 @@ void __forceinline__ launchMultiKernelBasedReduction(double&millisecond, T **g_i
             free(size[s]);
         }
 }
+
+template <class T, unsigned int blockSize, bool nIsPow2,bool useSM, bool useWarpSerial>
+void __forceinline__ launchBigKernelBasedReduction(double&microsecond, T **g_idata,  T **g_tdata, T *g_odata, unsigned int gridSize,  unsigned int data_per_gpu, unsigned int gpu_count=1)
+{  
+    //[gpu][step]ptr
+    unsigned int totalsteps=1;
+    unsigned int size_gpu=blockSize*gridSize;
+
+    T*** h_source_ptr=(T***)malloc(sizeof(T**)*gpu_count);
+    T*** h_destinate_ptr=(T***)malloc(sizeof(T**)*gpu_count);
+
+    T*** d_source_ptr=(T***)malloc(sizeof(T**)*gpu_count);
+    T*** d_destinate_ptr=(T***)malloc(sizeof(T**)*gpu_count);
+
+    unsigned int **h_size=(unsigned int**)malloc(sizeof(unsigned int*)*gpu_count);
+    unsigned int **d_size=(unsigned int**)malloc(sizeof(unsigned int*)*gpu_count);
+    
+    for(int gpuid=0; gpuid<gpu_count; gpuid++)
+     {
+        h_source_ptr[gpuid]=(T**)malloc(sizeof(T*)*(totalsteps+1));
+        h_destinate_ptr[gpuid]=(T**)malloc(sizeof(T*)*(totalsteps+1));
+        h_size[gpuid]=(unsigned int*)malloc(sizeof(unsigned int)*(totalsteps+1));
+        cudaSetDevice(gpuid);
+        cudaMalloc((void**)& d_source_ptr[gpuid], sizeof(T*)*(totalsteps+1));
+        cudaMalloc((void**)& d_destinate_ptr[gpuid], sizeof(T*)*(totalsteps+1));
+        cudaMalloc((void**)& d_size[gpuid], sizeof(unsigned int)*(totalsteps+1));
+
+        for(int l_step=0; l_step<totalsteps+1; l_step++)
+        {
+            h_source_ptr[gpuid][l_step]=NULL;
+            h_destinate_ptr[gpuid][l_step]=NULL;
+            h_size[gpuid][l_step]=0;
+        }
+    }
+
+    // from idata to t data in step 0
+    printf("data per gpu is %d\n",data_per_gpu);
+    for(int i=0; i<gpu_count; i++)
+    {
+        h_source_ptr[i][0]=g_idata[i];
+        h_destinate_ptr[i][0]=g_odata+i*size_gpu;
+        h_size[i][0]=data_per_gpu;
+    }
+    h_source_ptr[0][1]=g_odata;
+    h_destinate_ptr[0][1]=g_odata;
+    h_size[0][1]=size_gpu*gpu_count;
+    for(int gpuid=0; gpuid<gpu_count; gpuid++)    
+    {
+        cudaSetDevice(gpuid);
+        cudaMemcpy(d_source_ptr[gpuid], h_source_ptr[gpuid], sizeof(T*)*(totalsteps+1), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_destinate_ptr[gpuid], h_destinate_ptr[gpuid], sizeof(T*)*(totalsteps+1), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_size[gpuid], h_size[gpuid], sizeof(unsigned int)*(totalsteps+1), cudaMemcpyHostToDevice);
+        // dev_print<<<1,32>>>(d_size[gpuid],step+1);
+        cudaDeviceSynchronize();
+        cudaCheckError();
+    }
+    cudaCheckError();
+
+    cudaStream_t *mstream = (cudaStream_t*)malloc(sizeof(cudaStream_t)*gpu_count);
+        
+    timespec tsstart,tsend;
+    long time_elapsed_ns;
+
+    void***packedKernelArgs = (void***)malloc(sizeof(void**)*gpu_count); 
+    cudaLaunchParams *launchParamsList = (cudaLaunchParams *)malloc(
+        sizeof(cudaLaunchParams)*gpu_count);
+
+    for(int deviceid=0; deviceid<gpu_count;deviceid++)
+    {
+        cudaSetDevice(deviceid);
+        packedKernelArgs[deviceid]=(void**)malloc(sizeof(void*)*4);
+        packedKernelArgs[deviceid][0]=(void*)&d_source_ptr[deviceid];
+        packedKernelArgs[deviceid][1]=(void*)&d_destinate_ptr[deviceid];
+        packedKernelArgs[deviceid][2]=(void*)&d_size[deviceid];
+        packedKernelArgs[deviceid][3]=(void*)&totalsteps;
+        cudaStreamCreate(&mstream[deviceid]);
+            
+        launchParamsList[deviceid].func=(void*)reduce_mgrid<T,blockSize,true,useSM,useWarpSerial>;
+        launchParamsList[deviceid].gridDim=gridSize;
+        launchParamsList[deviceid].blockDim=blockSize;
+        if(useSM==true)
+        {
+            launchParamsList[deviceid].sharedMem=blockSize*sizeof(T);
+        }
+        else
+        {   
+            launchParamsList[deviceid].sharedMem=0;
+        }
+        launchParamsList[deviceid].stream=mstream[deviceid];
+        launchParamsList[deviceid].args=packedKernelArgs[deviceid];
+    }
+    
+    cudaCheckError();
+    //initialize transfer strategy
+    
+    cudaSetDevice(0);
+
+    //compute time
+    /************************************/
+    clock_gettime(CLOCK_REALTIME, &tsstart);
+
+    cudaLaunchCooperativeKernelMultiDevice(launchParamsList, gpu_count);
+    //synchronize
+    // for(int i=0; i<gpu_count;i++)
+    // {
+    //     cudaSetDevice(i);
+    //     cudaStreamSynchronize(mstream[i]);
+    // }
+    
+    cudaDeviceSynchronize();
+    // cudaDeviceSynchronize();
+    clock_gettime(CLOCK_REALTIME, &tsend);
+        /************************************/
+    time_elapsed_ns = (tsend.tv_nsec-tsstart.tv_nsec);
+    time_elapsed_ns += 1000000000*(tsend.tv_sec-tsstart.tv_sec);
+
+    microsecond = (double)time_elapsed_ns/1000;
+
+    cudaCheckError();
+
+    for(int deviceid=0; deviceid<gpu_count;deviceid++)
+    {
+        cudaSetDevice(deviceid);    
+        cudaCheckError();
+        cudaStreamDestroy(mstream[deviceid]);
+    }
+
+    cudaCheckError();
+
+    free(mstream);
+    free(packedKernelArgs);
+    free(launchParamsList);
+
+
+    for(int gpuid=0; gpuid<gpu_count; gpuid++)
+     {
+        free(h_source_ptr[gpuid]);
+        free(h_destinate_ptr[gpuid]);
+        free(h_size[gpuid]);
+        cudaFree(d_source_ptr[gpuid]);
+        cudaFree(d_destinate_ptr[gpuid]);
+        cudaFree(d_size[gpuid]);
+    }
+
+    free(h_source_ptr);
+    free(h_destinate_ptr);
+    free(d_source_ptr);
+    free(d_destinate_ptr);
+    free(h_size);
+    free(d_size);
+}
+
 
 template<class T, unsigned int blockSize, bool nIsPow2,bool useSM, bool useWarpSerial, bool useKernelLaunch>
 void single_test(double& millisecond, T&gpu_result, unsigned int gridSize, unsigned int g_array_size ,T* h_input, unsigned int gpu_count=1) 
