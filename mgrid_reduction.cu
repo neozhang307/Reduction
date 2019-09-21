@@ -478,11 +478,14 @@ void __forceinline__ launchKernelBasedReduction(T *g_idata, T *g_odata, unsigned
         else
         {
             fprintf(stderr,"switch to single block with size %d\n",n);
-
+            cudaDeviceSynchronize();
+            cudaCheckError();
             if(useSM==true)
                 reduce_kernel2<T,blockSize,true, useWarpSerial><<<1,blockSize,blockSize*sizeof(T)>>>(g_idata,g_odata,n); 
             else
                 reduce_kernel2<T,blockSize,false, useWarpSerial><<<1,blockSize>>>(g_idata,g_odata,n); 
+            cudaDeviceSynchronize();
+            cudaCheckError();
         }
 }
 template <class T, unsigned int blockSize, bool nIsPow2,bool useSM, bool useWarpSerial>
@@ -616,6 +619,7 @@ void basic_transfer_alter
     {
         cudaSetDevice(src_gpu);
         cudaStreamSynchronize(mstream[src_gpu]);
+        cudaCheckError();
     }
 }
 
@@ -665,13 +669,13 @@ void __forceinline__ launchMultiKernelBasedReduction(double&microsecond, T **g_i
         cudaCheckError();
         unsigned int size_gpu=blockSize*gridSize;
         //initialize transfer strategy
-        unsigned int steps=1;
+        unsigned int totalsteps=(gpu_count-1)/4+1;
 
-        T**** source_ptr=(T****)malloc(sizeof(T***)*steps);
-        T**** destinate_ptr=(T****)malloc(sizeof(T***)*steps);
+        T**** source_ptr=(T****)malloc(sizeof(T***)*totalsteps);
+        T**** destinate_ptr=(T****)malloc(sizeof(T***)*totalsteps);
         // unsigned int size[1][2][2];
-        unsigned int ***size=(unsigned int***)malloc(sizeof(unsigned int**)*steps);
-        for(int s=0; s<steps; s++)
+        unsigned int ***size=(unsigned int***)malloc(sizeof(unsigned int**)*totalsteps);
+        for(int s=0; s<totalsteps; s++)
         {
             source_ptr[s]=(T***)malloc(sizeof(T**)*gpu_count);
             destinate_ptr[s]=(T***)malloc(sizeof(T**)*gpu_count);
@@ -689,33 +693,48 @@ void __forceinline__ launchMultiKernelBasedReduction(double&microsecond, T **g_i
                 }
             }
         }
+        T* tmp_ptr_4g;
+        if(gpu_count<=4)
+        {
+            for(int i=0; i<gpu_count; i++)
+            {
+                size[0][i][0]=size_gpu;
+                source_ptr[0][i][0]=g_tdata[i];
+                destinate_ptr[0][i][0]=g_odata+i*size_gpu;
+            }
+        }
+        else if(gpu_count<=8)
+        {
+            cudaMalloc((void**)&tmp_ptr_4g, sizeof(T)*4*size_gpu);
+            for(int i=0; i<gpu_count-4; i++)
+            {
+                size[0][i+4][4]=size_gpu;
+                source_ptr[0][i+4][4]=g_tdata[i+4];
+                destinate_ptr[0][i+4][4]=tmp_ptr_4g+i*size_gpu;
+            }
 
-        size[0][0][0]=size_gpu;
-        source_ptr[0][0][0]=g_tdata[0];
-        destinate_ptr[0][0][0]=g_odata;
+            size[1][4][0]=size_gpu*4;
+            source_ptr[1][4][0]=tmp_ptr_4g;
+            destinate_ptr[1][4][0]=g_odata+4*size_gpu;
+        }
 
-        size[0][1][0]=size_gpu;
-        source_ptr[0][1][0]=g_tdata[1];
-        destinate_ptr[0][1][0]=g_odata+size_gpu;
 
         //compute time
         /************************************/
-        
+        clock_gettime(CLOCK_REALTIME, &tsstart);
+
     #pragma omp parallel num_threads(gpu_count)
         {
-            unsigned int tid=omp_get_thread_num() ;
+            unsigned int tid=omp_get_thread_num() ;  
             cudaSetDevice(tid);
-            if(tid==0)
-            {
-                clock_gettime(CLOCK_REALTIME, &tsstart);
-            }
+
     #pragma omp barrier
             
             {
                 // cudaLaunchCooperativeKernel((void*)reduce_kernel1<T,nIsPow2>, gridSize, blockSize, packedKernelArgs[tid],0,mstream[tid]);
                 reduce_kernel1<T, nIsPow2><<<gridSize,blockSize>>>(g_idata[tid],g_tdata[tid],data_per_gpu); 
             }
-            for(unsigned int step=0; step<steps; step++)
+            for(unsigned int step=0; step<totalsteps; step++)
             {
                 sync_last_step(size,tid,gpu_count,step,mstream);
                 single_step_transfer<T>(source_ptr,destinate_ptr,size,tid,gpu_count,step,mstream);
@@ -723,16 +742,14 @@ void __forceinline__ launchMultiKernelBasedReduction(double&microsecond, T **g_i
             }
             if(tid==0)
             {
-                sync_last_step(size,tid,gpu_count,steps,mstream);
+                
+                sync_last_step(size,tid,gpu_count,totalsteps,mstream);
+                cudaSetDevice(0);
                 launchKernelBasedReduction<T,blockSize,true,useSM,useWarpSerial>(g_odata,g_odata,gridSize,size_gpu*gpu_count);
                 cudaDeviceSynchronize();
             }
-    #pragma omp barrier
-            if(tid==0)
-            {
-                clock_gettime(CLOCK_REALTIME, &tsend);
-            }
         }
+        clock_gettime(CLOCK_REALTIME, &tsend);
         /******************timer******************/
         {
             time_elapsed_ns = (tsend.tv_nsec-tsstart.tv_nsec);
@@ -755,7 +772,7 @@ void __forceinline__ launchMultiKernelBasedReduction(double&microsecond, T **g_i
             // free(packedKernelArgs);
             // free(launchParamsList);
 
-            for(int s=0; s<steps; s++)
+            for(int s=0; s<totalsteps; s++)
             {
                 for(int src_gpu=0; src_gpu<gpu_count; src_gpu++)
                 {
@@ -767,13 +784,17 @@ void __forceinline__ launchMultiKernelBasedReduction(double&microsecond, T **g_i
                 free(destinate_ptr[s]);
                 free(size[s]);
             }
+            if(gpu_count>4)
+            {
+                free(tmp_ptr_4g);
+            }
         }
 }
 template <class T, unsigned int blockSize, bool nIsPow2,bool useSM, bool useWarpSerial>
 void __forceinline__ launchBigKernelBasedReduction(double&microsecond, T **g_idata,  T **g_tdata, T *g_odata, unsigned int gridSize,  unsigned int data_per_gpu, unsigned int gpu_count=1)
 {  
     //[gpu][step]ptr
-    unsigned int step=1;
+    unsigned int totalsteps=(gpu_count-1)/4+1;
     unsigned int size_gpu=blockSize*gridSize;
 
     T*** h_source_ptr=(T***)malloc(sizeof(T**)*gpu_count);
@@ -787,15 +808,15 @@ void __forceinline__ launchBigKernelBasedReduction(double&microsecond, T **g_ida
     
     for(int gpuid=0; gpuid<gpu_count; gpuid++)
      {
-        h_source_ptr[gpuid]=(T**)malloc(sizeof(T*)*(step+1));
-        h_destinate_ptr[gpuid]=(T**)malloc(sizeof(T*)*(step+1));
-        h_size[gpuid]=(unsigned int*)malloc(sizeof(unsigned int)*(step+1));
+        h_source_ptr[gpuid]=(T**)malloc(sizeof(T*)*(totalsteps+1));
+        h_destinate_ptr[gpuid]=(T**)malloc(sizeof(T*)*(totalsteps+1));
+        h_size[gpuid]=(unsigned int*)malloc(sizeof(unsigned int)*(totalsteps+1));
         cudaSetDevice(gpuid);
-        cudaMalloc((void**)& d_source_ptr[gpuid], sizeof(T*)*(step+1));
-        cudaMalloc((void**)& d_destinate_ptr[gpuid], sizeof(T*)*(step+1));
-        cudaMalloc((void**)& d_size[gpuid], sizeof(unsigned int)*(step+1));
+        cudaMalloc((void**)& d_source_ptr[gpuid], sizeof(T*)*(totalsteps+1));
+        cudaMalloc((void**)& d_destinate_ptr[gpuid], sizeof(T*)*(totalsteps+1));
+        cudaMalloc((void**)& d_size[gpuid], sizeof(unsigned int)*(totalsteps+1));
 
-        for(int l_step=0; l_step<step+1; l_step++)
+        for(int l_step=0; l_step<totalsteps+1; l_step++)
         {
             h_source_ptr[gpuid][l_step]=NULL;
             h_destinate_ptr[gpuid][l_step]=NULL;
@@ -805,21 +826,60 @@ void __forceinline__ launchBigKernelBasedReduction(double&microsecond, T **g_ida
 
     // from idata to t data in step 0
     printf("data per gpu is %d\n",data_per_gpu);
-    for(int i=0; i<gpu_count; i++)
+    T* tmp_ptr_0g;
+    T* tmp_ptr_4g;
+
+    if(gpu_count<=4)
     {
-        h_source_ptr[i][0]=g_idata[i];
-        h_destinate_ptr[i][0]=g_odata+i*size_gpu;
-        h_size[i][0]=data_per_gpu;
+        for(int i=0; i<gpu_count; i++)
+        {
+            h_source_ptr[i][0]=g_idata[i];
+            h_destinate_ptr[i][0]=g_odata+i*size_gpu;
+            h_size[i][0]=data_per_gpu;
+        }
+        h_source_ptr[0][1]=g_odata;
+        h_destinate_ptr[0][1]=g_odata;
+        h_size[0][1]=size_gpu*gpu_count;
     }
-    h_source_ptr[0][1]=g_odata;
-    h_destinate_ptr[0][1]=g_odata;
-    h_size[0][1]=size_gpu*gpu_count;
+    else  if(gpu_count<=8)
+    {
+        cudaMalloc((void**)&tmp_ptr_0g,sizeof(T)*4*size_gpu);
+        for(int i=0; i<4; i++)
+        {
+            h_source_ptr[i][0]=g_idata[i];
+            h_destinate_ptr[i][0]=tmp_ptr_0g+i*size_gpu;
+            h_size[i][0]=data_per_gpu;
+        }
+        cudaSetDevice(4);
+        cudaMalloc((void**)&tmp_ptr_4g,sizeof(T)*4*size_gpu);
+
+        for(int i=4; i<gpu_count; i++)
+        {
+            h_source_ptr[i][0]=g_idata[i];
+            h_destinate_ptr[i][0]=tmp_ptr_4g+(i-4)*size_gpu;
+            h_size[i][0]=data_per_gpu;
+        }
+
+        h_source_ptr[0][1]=tmp_ptr_0g;
+        h_destinate_ptr[0][1]=g_odata;
+        h_size[0][1]=size_gpu*4;
+        
+        h_source_ptr[4][1]=tmp_ptr_4g;
+        h_destinate_ptr[4][1]=g_odata+size_gpu;
+        h_size[4][1]=size_gpu*4;
+        
+
+        h_source_ptr[0][2]=g_odata;
+        h_destinate_ptr[0][2]=g_odata;
+        h_size[0][2]=size_gpu*2;
+    }
+
     for(int gpuid=0; gpuid<gpu_count; gpuid++)    
     {
         cudaSetDevice(gpuid);
-        cudaMemcpy(d_source_ptr[gpuid], h_source_ptr[gpuid], sizeof(T*)*(step+1), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_destinate_ptr[gpuid], h_destinate_ptr[gpuid], sizeof(T*)*(step+1), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_size[gpuid], h_size[gpuid], sizeof(unsigned int)*(step+1), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_source_ptr[gpuid], h_source_ptr[gpuid], sizeof(T*)*(totalsteps+1), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_destinate_ptr[gpuid], h_destinate_ptr[gpuid], sizeof(T*)*(totalsteps+1), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_size[gpuid], h_size[gpuid], sizeof(unsigned int)*(totalsteps+1), cudaMemcpyHostToDevice);
         // dev_print<<<1,32>>>(d_size[gpuid],step+1);
         cudaDeviceSynchronize();
         cudaCheckError();
@@ -842,7 +902,7 @@ void __forceinline__ launchBigKernelBasedReduction(double&microsecond, T **g_ida
         packedKernelArgs[deviceid][0]=(void*)&d_source_ptr[deviceid];
         packedKernelArgs[deviceid][1]=(void*)&d_destinate_ptr[deviceid];
         packedKernelArgs[deviceid][2]=(void*)&d_size[deviceid];
-        packedKernelArgs[deviceid][3]=(void*)&step;
+        packedKernelArgs[deviceid][3]=(void*)&totalsteps;
         cudaStreamCreate(&mstream[deviceid]);
             
         launchParamsList[deviceid].func=(void*)reduce_mgrid<T,blockSize,true,useSM,useWarpSerial>;
@@ -911,6 +971,11 @@ void __forceinline__ launchBigKernelBasedReduction(double&microsecond, T **g_ida
         cudaFree(d_destinate_ptr[gpuid]);
         cudaFree(d_size[gpuid]);
     }
+    if(gpu_count>4)
+    {
+        cudaFree(tmp_ptr_0g);
+        cudaFree(tmp_ptr_4g);
+    }
 
     free(h_source_ptr);
     free(h_destinate_ptr);
@@ -930,7 +995,7 @@ void single_test(double& microsecond, T&gpu_result, unsigned int gridSize, unsig
     T** d_input = (T**)malloc(sizeof(T*)*gpu_count); 
     T** d_tmp = (T**)malloc(sizeof(T*)*gpu_count); 
     T* d_output; 
-
+    cudaCheckError();
     for(int deviceid=0; deviceid<gpu_count; deviceid++)
     {
         cudaSetDevice(deviceid);
@@ -945,8 +1010,15 @@ void single_test(double& microsecond, T&gpu_result, unsigned int gridSize, unsig
     
     cudaCheckError();
 
-    // launchMultiKernelBasedReduction<T, blockSize,true,useSM,useWarpSerial>(microsecond, d_input, d_tmp,d_output, gridSize,  l_array_size, gpu_count);
-    launchBigKernelBasedReduction<T, blockSize,true,true,useWarpSerial>(microsecond, d_input, d_tmp,d_output, gridSize,  l_array_size, gpu_count);
+    if(useKernelLaunch)
+    {
+        launchMultiKernelBasedReduction<T, blockSize,nIsPow2,useSM,useWarpSerial>(microsecond, d_input, d_tmp,d_output, gridSize,  l_array_size, gpu_count);
+    }
+    else
+    {
+        launchBigKernelBasedReduction<T, blockSize,nIsPow2,useSM,useWarpSerial>(microsecond, d_input, d_tmp,d_output, gridSize,  l_array_size, gpu_count);
+    }
+
     cudaCheckError();
 
     cudaCheckError();
@@ -1004,7 +1076,7 @@ int main()
 
     unsigned int thread_per_block=1024;
     unsigned int block_per_sm=1;
-    unsigned int data_per_thread=20000;
+    unsigned int data_per_thread=2;
     // unsigned int data_per_thread=2;
     // unsigned int type=0; 
 
@@ -1035,243 +1107,18 @@ int main()
     //     isPow2=false;
     // }
     unsigned int gpu_count=2;
-    unsigned int access[4];
+    unsigned int *access=(unsigned int*)malloc(sizeof(unsigned int)*gpu_count*gpu_count);
     getAceessMatrix(access,gpu_count);
     // switchall(T, thread_per_block, isPow2, useSM,useWarpSerial,useKernelLaunch);
-    my_single_test(double,1024,true,false,true,true,gpu_count);
+
+    my_single_test(double,1024,true,false,true,false,gpu_count);
 
     fprintf(stderr,"%f-%f=%f\n",cpu_result,(double)gpu_result,cpu_result*gpu_count-gpu_result);   
     printf("useSM: %d, use warp serial:%d, use kernel launch:%d, block/SM %d thread %d totalsize %lu time: %f us speed: %f GB/s\n",\
           useSM, useWarpSerial,useKernelLaunch,\
           block_per_sm,thread_per_block, (unsigned long)size*gpu_count,\
           (double)microsecond, (double)size*gpu_count*sizeof(double)/1000/1000/1000/(microsecond/1000/1000));\
-
+    free(access);
   
     free(h_input);   
 }
-
-
-// #define switchuseSM(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch)\
-//     if(useSM==true){my_single_test(type,threadcount,isPow2,true,useWarpSerial,useKernelLaunch);}\
-//     if(useSM==false){my_single_test(type,threadcount,isPow2,false,useWarpSerial,useKernelLaunch);}\
-
-// #define switchuseWarpSerial(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch)\
-//     if(useWarpSerial==true){switchuseSM(type,threadcount,isPow2,useSM,true,useKernelLaunch);}\
-//     if(useWarpSerial==false){switchuseSM(type,threadcount,isPow2,useSM,false,useKernelLaunch);}    
-
-// #define switchuseKernelLaunch(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch)\
-//     if(useKernelLaunch==true){switchuseWarpSerial(type,threadcount,isPow2,useSM,useWarpSerial,true);}\
-//     if(useKernelLaunch==false){switchuseWarpSerial(type,threadcount,isPow2,useSM,useWarpSerial,false);}    
-
-// #define switchisPow2(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch)\
-//     if(isPow2==true){switchuseKernelLaunch(type,threadcount,true,useSM,useWarpSerial,useKernelLaunch);}\
-//     if(isPow2==false){switchuseKernelLaunch(type,threadcount,false,useSM,useWarpSerial,useKernelLaunch);}
-
-// #define switchall(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch)\
-//     switch(threadcount) \
-//     {\
-//         case 32:\
-//             switchisPow2(type, 32, isPow2, useSM,useWarpSerial,useKernelLaunch);\
-//             break;\
-//         case 64:\
-//             switchisPow2(type, 64, isPow2, useSM,useWarpSerial,useKernelLaunch);\
-//             break;\
-//         case 128:\
-//             switchisPow2(type, 128, isPow2, useSM,useWarpSerial,useKernelLaunch);\
-//             break;\
-//         case 256:\
-//             switchisPow2(type, 256, isPow2, useSM,useWarpSerial,useKernelLaunch);\
-//             break;\
-//         case 512:\
-//             switchisPow2(type, 512, isPow2, useSM,useWarpSerial,useKernelLaunch);\
-//             break;\
-//         case 1024:\
-//             switchisPow2(type, 1024, isPow2, useSM,useWarpSerial,useKernelLaunch);\
-//             break;\
-//     }
-
-
-
-// template <class T>
-// void runTest(unsigned int thread_per_block, unsigned int block_per_sm,
-//     unsigned int smx_count,
-//     unsigned int size,
-//     unsigned int repeat,
-//     unsigned int skip,
-//     bool useSM,
-//     bool useWarpSerial,
-//     bool useKernelLaunch
-//     )
-// {
-//     float millisecond;
-//     bool isPow2=false;
-//     T gpu_result;
-//     T* h_input = (T*)malloc(sizeof(T)*size);
-//     for(int i=0; i<size; i++) 
-//     {
-//         h_input[i]=1;
-//     }
-//     double cpu_result=cpu_reduce<T>(h_input,size);
-//     if(size%(thread_per_block*smx_count*2)==0)
-//     { 
-//         isPow2=true;
-//     }
-//     else
-//     {
-//         isPow2=false;
-//     }
-    
-//     switchall(T, thread_per_block, isPow2, useSM,useWarpSerial,useKernelLaunch);
-
-//     fprintf(stderr,"%f-%f=%f\n",cpu_result,(double)gpu_result,cpu_result-gpu_result);   
-//     printf("useSM: %d, use warp serial:%d, use kernel launch:%d, block/SM %d thread %d totalsize %d time: %f ms speed: %f GB/s\n",\
-//           useSM, useWarpSerial,useKernelLaunch,\
-//           block_per_sm,thread_per_block, size,\
-//           (double)millisecond, (double)size*sizeof(T)/1000/1000/1000/(millisecond/1000));\
-
-  
-//     free(h_input); 
-// }
-
-// void PrintHelp()
-// {
-//     printf(
-//             "--thread <n>(t):           thread per block\n \
-//              --block <n>(b):            block per sm\n \
-//              --base_array <n>(a):       average array per thread\n \
-//              --array <n>(n):            total array size\n \
-//              --repeat <n>(r):           time of experiment (larger than 2)\n \
-//              --type <n>(v):             type of experiment (0:int 1:float 2:double)\n \
-//              --sharememory(s):          use shared memory at block level reduction (default false)\n \
-//              --warpserial(w):           use warpserial implementation (default false)\n \
-//              --kernellaunch(k):         use kernel launch as an implicit barrier (default false)\n");
-//     exit(1);
-// }
-
-// #include <getopt.h>
-// #include<iostream>
-// int main(int argc, char **argv)
-// {
-//     cudaDeviceProp deviceProp;
-//     cudaSetDevice(0);
-//     cudaGetDeviceProperties(&deviceProp, 0);
-//     unsigned int smx_count = deviceProp.multiProcessorCount;
-
-//     unsigned int thread_per_block=1024;
-//     unsigned int block_per_sm=2;
-//     unsigned int data_per_thread=4;
-//     unsigned int type=0; 
-
-//     bool useSM=false;
-//     bool useWarpSerial=false;
-//     bool useKernelLaunch=false;
-//     unsigned int size = 0;
-
-//     unsigned int repeat=11;
-//     unsigned int skip=1;
-
-//     const char* const short_opts = "t:b:a:n:r:v:swk";
-//     const option long_opts[] = {
-//             {"thread", required_argument, nullptr, 't'},
-//             {"block", required_argument, nullptr, 'b'},
-//             {"base_array", required_argument, nullptr, 'a'},
-//             {"array", required_argument, nullptr, 'n'},
-//             {"repeat", required_argument, nullptr, 'r'},
-//             {"type", required_argument, nullptr, 'v'},
-//             {"sharememory", no_argument, nullptr, 's'},
-//             {"warpserial", no_argument, nullptr, 'w'},
-//             {"kernellaunch", no_argument, nullptr, 'k'},
-//             {nullptr, no_argument, nullptr, 0}
-//     };
-
-//     while (true)
-//     {
-//         const auto opt = getopt_long(argc, argv, short_opts, long_opts, nullptr);
-
-//         if (-1 == opt)
-//             break;
-
-//         switch (opt)
-//         {
-//         case 't':
-//             thread_per_block = std::stoi(optarg);
-//             fprintf(stderr,"thread set to: %d\n",thread_per_block);
-//             break;
-
-//         case 'b':
-//             block_per_sm = std::stoi(optarg);
-//             fprintf(stderr,"block set to: %d\n",block_per_sm);
-//             break;
-
-//         case 'a':
-//             data_per_thread = std::stoi(optarg);
-//             fprintf(stderr,"data per thread set to: %d\n",data_per_thread);
-//             break;
-
-//         case 'n':
-//             size = std::stoi(optarg);
-//             fprintf(stderr,"array size set to: %d\n",size);
-//             break;
-
-//         case 'r':
-//             repeat = std::stoi(optarg);
-//             if(repeat<=2)
-//             {
-//                 repeat=1;
-//                 skip=0;
-//                 fprintf(stderr,"repeat set to: %d and skip 0 experiment\n",repeat);
-//             }
-//             else
-//             {
-//                 fprintf(stderr,"repeat set to: %d\n",repeat);
-//             }
-//             break;
-//         case 'v':
-//             type = std::stoi(optarg);
-//             type=type>=3?0:type;
-//             fprintf(stderr,"type set to (0:int 1:float 2:double): %d\n",type);
-//             break;
-//         case 's':
-//             useSM = true;
-//             fprintf(stderr,"useSM is set to true\n");
-//             break;
-
-//         case 'w':
-//             useWarpSerial = true;
-//             fprintf(stderr,"useWarpSerial is set to true\n");
-//             break;
-
-//         case 'k':
-//             useKernelLaunch = true;
-//             fprintf(stderr,"useKernelLaunch is set to true\n");
-//             break;
-
-//         default:
-//             PrintHelp();
-//             break;
-//         }
-//     }
-
-//     size = size==0?block_per_sm*thread_per_block*smx_count*data_per_thread:size;
-//     switch(type)
-//     {
-//         case 0:
-//         runTest<int>(thread_per_block, block_per_sm,smx_count,
-//                 size,repeat,skip,
-//                 useSM,useWarpSerial,useKernelLaunch);
-//         break;
-//         case 1:
-//         runTest<float>(thread_per_block, block_per_sm,smx_count,
-//                 size,repeat,skip,
-//                 useSM,useWarpSerial,useKernelLaunch);
-//         break;
-//         case 2:
-//         runTest<double>(thread_per_block, block_per_sm,smx_count,
-//                 size,repeat,skip,
-//                 useSM,useWarpSerial,useKernelLaunch);
-//         break;
-
-//     }
-
-//  }
-

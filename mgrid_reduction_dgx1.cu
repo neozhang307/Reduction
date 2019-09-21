@@ -932,7 +932,7 @@ void single_test(double& microsecond, T&gpu_result, unsigned int gridSize, unsig
     for(int deviceid=0; deviceid<gpu_count; deviceid++)
     {
         //printf("here is devide %d\n",deviceid);
-	cudaSetDevice(deviceid);
+	   cudaSetDevice(deviceid);
     	cudaCheckError();
         cudaMalloc((void**)&d_input[deviceid], sizeof(T)*l_array_size); 
         cudaMalloc((void**)&d_tmp[deviceid], sizeof(T)*l_array_size); 
@@ -1040,7 +1040,7 @@ int main()
     my_single_test(double,1024,true,false,true,true,gpu_count);
 
     fprintf(stderr,"%f-%f=%f\n",cpu_result,(double)gpu_result,cpu_result*gpu_count-gpu_result);   
-    printf("useSM: %d, use warp serial:%d, use kernel launch:%d, block/SM %d thread %d totalsize %d time: %f us speed: %f GB/s per GPU and %f GB/s totally\n",\
+    printf("useSM: %d, use warp serial:%d, use kernel launch:%d, block/SM %d thread %d totalsize %d time: %f us speed: %f GB/s per GPU and %f GB/s totall\n",\
           useSM, useWarpSerial,useKernelLaunch,\
           block_per_sm,thread_per_block, size,\
           (double)microsecond, (double)size*sizeof(double)/1000/1000/1000/(microsecond/1000/1000),(double)size*gpu_count*sizeof(double)/1000/1000/1000/(microsecond/1000/1000));\
