@@ -1214,7 +1214,6 @@ void single_test(double& microsecond, T&gpu_result, unsigned int gridSize, unsig
 
     
     free(h_output);
-    cudaFree(d_input);
     for(int deviceid=0; deviceid<gpu_count; deviceid++)
     {
         cudaSetDevice(deviceid);
@@ -1244,55 +1243,131 @@ void single_test(double& microsecond, T&gpu_result, unsigned int gridSize, unsig
     }while(0)
 
  
+#define switchuseSM(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch)\
+    if(useSM==true){my_single_test(type,threadcount,isPow2,true,useWarpSerial,useKernelLaunch,gpu_count);}\
+    if(useSM==false){my_single_test(type,threadcount,isPow2,false,useWarpSerial,useKernelLaunch,gpu_count);}\
+
+#define switchuseWarpSerial(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch)\
+    if(useWarpSerial==true){switchuseSM(type,threadcount,isPow2,useSM,true,useKernelLaunch);}\
+    if(useWarpSerial==false){switchuseSM(type,threadcount,isPow2,useSM,false,useKernelLaunch);}    
+
+#define switchuseKernelLaunch(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch)\
+    if(useKernelLaunch==true){switchuseWarpSerial(type,threadcount,isPow2,useSM,useWarpSerial,true);}\
+    if(useKernelLaunch==false){switchuseWarpSerial(type,threadcount,isPow2,useSM,useWarpSerial,false);}    
+
+#define switchisPow2(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch)\
+    if(isPow2==true){switchuseKernelLaunch(type,threadcount,true,useSM,useWarpSerial,useKernelLaunch);}\
+    if(isPow2==false){switchuseKernelLaunch(type,threadcount,false,useSM,useWarpSerial,useKernelLaunch);}
+
+// #define switchall(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch)\
+//     switchisPow2(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch);
+
+#define switchall(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch)\
+    switch(threadcount) \
+    {\
+        case 32:\
+            switchisPow2(type, 32, isPow2, useSM,useWarpSerial,useKernelLaunch);\
+            break;\
+        case 64:\
+            switchisPow2(type, 64, isPow2, useSM,useWarpSerial,useKernelLaunch);\
+            break;\
+        case 128:\
+            switchisPow2(type, 128, isPow2, useSM,useWarpSerial,useKernelLaunch);\
+            break;\
+        case 256:\
+            switchisPow2(type, 256, isPow2, useSM,useWarpSerial,useKernelLaunch);\
+            break;\
+        case 512:\
+            switchisPow2(type, 512, isPow2, useSM,useWarpSerial,useKernelLaunch);\
+            break;\
+        case 1024:\
+            switchisPow2(type, 1024, isPow2, useSM,useWarpSerial,useKernelLaunch);\
+            break;\
+    }
 
 
-// #define thread_per_block 1024
 
-int main()
+
+// int main()
+// {
+//     cudaDeviceProp deviceProp;
+//     cudaSetDevice(0);
+//     cudaGetDeviceProperties(&deviceProp, 0);
+//     unsigned int smx_count = deviceProp.multiProcessorCount;
+
+//     unsigned int thread_per_block=1024;
+//     unsigned int block_per_sm=1;
+//     unsigned int data_per_thread=2;
+//     unsigned int gpu_count=7;
+//     // unsigned int data_per_thread=2;
+//     // unsigned int type=0; 
+
+//     unsigned int size=data_per_thread*thread_per_block*block_per_sm*smx_count;
+
+
+//     unsigned int repeat=1;
+//     unsigned int skip=0;
+
+//     bool useSM=false;
+//     bool useWarpSerial=false;
+//     bool useKernelLaunch=false;
+//     double microsecond;
+//     // bool isPow2=false;
+//     double gpu_result;
+//     double* h_input = (double*)malloc(sizeof(double)*size);
+//     for(int i=0; i<size; i++) 
+//     {
+//         h_input[i]=1;
+//     }
+//     double cpu_result=cpu_reduce<double>(h_input,size);
+
+//     unsigned int *access=(unsigned int*)malloc(sizeof(unsigned int)*gpu_count*gpu_count);
+//     getAceessMatrix(access,gpu_count);
+//     // switchall(T, thread_per_block, isPow2, useSM,useWarpSerial,useKernelLaunch);
+
+//     my_single_test(double,1024,true,false,true,true,gpu_count);
+
+//     fprintf(stderr,"%f-%f=%f\n",cpu_result,(double)gpu_result,cpu_result*gpu_count-gpu_result);   
+//     printf("useSM: %d, use warp serial:%d, use kernel launch:%d, block/SM %d thread %d totalsize %lu time: %f us speed: %f GB/s\n",\
+//           useSM, useWarpSerial,useKernelLaunch,\
+//           block_per_sm,thread_per_block, (unsigned long)size*gpu_count,\
+//           (double)microsecond, (double)size*gpu_count*sizeof(double)/1000/1000/1000/(microsecond/1000/1000));\
+//     free(access);
+  
+//     free(h_input);   
+// }
+
+template <class T>
+void runTest(unsigned int thread_per_block, unsigned int block_per_sm,
+    unsigned int smx_count, unsigned int gpu_count,
+    unsigned int size,
+    unsigned int repeat,
+    unsigned int skip,
+    bool useSM,
+    bool useWarpSerial,
+    bool useKernelLaunch
+    )
 {
-    cudaDeviceProp deviceProp;
-    cudaSetDevice(0);
-    cudaGetDeviceProperties(&deviceProp, 0);
-    unsigned int smx_count = deviceProp.multiProcessorCount;
-
-    unsigned int thread_per_block=1024;
-    unsigned int block_per_sm=1;
-    unsigned int data_per_thread=2;
-    unsigned int gpu_count=7;
-    // unsigned int data_per_thread=2;
-    // unsigned int type=0; 
-
-    unsigned int size=data_per_thread*thread_per_block*block_per_sm*smx_count;
-
-
-    unsigned int repeat=1;
-    unsigned int skip=0;
-
-    bool useSM=false;
-    bool useWarpSerial=false;
-    bool useKernelLaunch=false;
     double microsecond;
-    // bool isPow2=false;
-    double gpu_result;
-    double* h_input = (double*)malloc(sizeof(double)*size);
+    bool isPow2=false;
+    T gpu_result;
+    T* h_input = (T*)malloc(sizeof(T)*size);
     for(int i=0; i<size; i++) 
     {
         h_input[i]=1;
     }
-    double cpu_result=cpu_reduce<double>(h_input,size);
-    // if(size%(thread_per_block*smx_count*2)==0)
-    // { 
-    //     isPow2=true;
-    // }
-    // else
-    // {
-    //     isPow2=false;
-    // }
+    double cpu_result=cpu_reduce<T>(h_input,size);
+    if(size%(thread_per_block*smx_count*2)==0)
+    { 
+        isPow2=true;
+    }
+    else
+    {
+        isPow2=false;
+    }
     unsigned int *access=(unsigned int*)malloc(sizeof(unsigned int)*gpu_count*gpu_count);
     getAceessMatrix(access,gpu_count);
-    // switchall(T, thread_per_block, isPow2, useSM,useWarpSerial,useKernelLaunch);
-
-    my_single_test(double,1024,true,false,true,true,gpu_count);
+    switchall(T, thread_per_block, isPow2, useSM,useWarpSerial,useKernelLaunch);
 
     fprintf(stderr,"%f-%f=%f\n",cpu_result,(double)gpu_result,cpu_result*gpu_count-gpu_result);   
     printf("useSM: %d, use warp serial:%d, use kernel launch:%d, block/SM %d thread %d totalsize %lu time: %f us speed: %f GB/s\n",\
@@ -1303,3 +1378,158 @@ int main()
   
     free(h_input);   
 }
+
+void PrintHelp()
+{
+    printf(
+            "--thread <n>(t):           thread per block\n \
+             --block <n>(b):            block per sm\n \
+             --gpu <n>(g):              gpu count\n \
+             --base_array <n>(a):       average array per thread\n \
+             --array <n>(n):            total array size\n \
+             --repeat <n>(r):           time of experiment (larger than 2)\n \
+             --type <n>(v):             type of experiment (0:int 1:float 2:double)\n \
+             --sharememory(s):          use shared memory at block level reduction (default false)\n \
+             --warpserial(w):           use warpserial implementation (default false)\n \
+             --kernellaunch(k):         use kernel launch as an implicit barrier (default false)\n");
+    exit(1);
+}
+
+#include <getopt.h>
+#include<iostream>
+int main(int argc, char **argv)
+{
+    cudaDeviceProp deviceProp;
+    cudaSetDevice(0);
+    cudaGetDeviceProperties(&deviceProp, 0);
+    unsigned int smx_count = deviceProp.multiProcessorCount;
+    
+
+    unsigned int thread_per_block=1024;
+    unsigned int block_per_sm=2;
+    unsigned int data_per_thread=4;
+    unsigned int gpu_count=2;
+    unsigned int type=0; 
+
+    bool useSM=false;
+    bool useWarpSerial=false;
+    bool useKernelLaunch=false;
+    unsigned int size = 0;
+
+    unsigned int repeat=11;
+    unsigned int skip=1;
+
+    const char* const short_opts = "t:b:g:a:n:r:v:swk";
+    const option long_opts[] = {
+            {"thread", required_argument, nullptr, 't'},
+            {"block", required_argument, nullptr, 'b'},
+            {"gpu", required_argument, nullptr, 'g'},
+            {"base_array", required_argument, nullptr, 'a'},
+            {"array", required_argument, nullptr, 'n'},
+            {"repeat", required_argument, nullptr, 'r'},
+            {"type", required_argument, nullptr, 'v'},
+            {"sharememory", no_argument, nullptr, 's'},
+            {"warpserial", no_argument, nullptr, 'w'},
+            {"kernellaunch", no_argument, nullptr, 'k'},
+            {nullptr, no_argument, nullptr, 0}
+    };
+
+    while (true)
+    {
+        const auto opt = getopt_long(argc, argv, short_opts, long_opts, nullptr);
+
+        if (-1 == opt)
+            break;
+
+        switch (opt)
+        {
+        case 't':
+            thread_per_block = std::stoi(optarg);
+            fprintf(stderr,"thread set to: %d\n",thread_per_block);
+            break;
+
+        case 'b':
+            block_per_sm = std::stoi(optarg);
+            fprintf(stderr,"block set to: %d\n",block_per_sm);
+            break;
+
+        case 'b':
+            gpu_count = std::stoi(optarg);
+            fprintf(stderr,"gpu count set to: %d\n",gpu_count);
+            break;
+
+        case 'a':
+            data_per_thread = std::stoi(optarg);
+            fprintf(stderr,"data per thread set to: %d\n",data_per_thread);
+            break;
+
+        case 'n':
+            size = std::stoi(optarg);
+            fprintf(stderr,"array size set to: %d\n",size);
+            break;
+
+        case 'r':
+            repeat = std::stoi(optarg);
+            if(repeat<=2)
+            {
+                repeat=1;
+                skip=0;
+                fprintf(stderr,"repeat set to: %d and skip 0 experiment\n",repeat);
+            }
+            else
+            {
+                fprintf(stderr,"repeat set to: %d\n",repeat);
+            }
+            break;
+        case 'v':
+            type = std::stoi(optarg);
+            type=type>=3?0:type;
+            fprintf(stderr,"type set to (0:int 1:float 2:double): %d\n",type);
+            break;
+        case 's':
+            useSM = true;
+            fprintf(stderr,"useSM is set to true\n");
+            break;
+
+        case 'w':
+            useWarpSerial = true;
+            fprintf(stderr,"useWarpSerial is set to true\n");
+            break;
+
+        case 'k':
+            useKernelLaunch = true;
+            fprintf(stderr,"useKernelLaunch is set to true\n");
+            break;
+
+        default:
+            PrintHelp();
+            break;
+        }
+    }
+
+    size = size==0?block_per_sm*thread_per_block*smx_count*data_per_thread:size;
+    switch(type)
+    {
+        case 0:
+        runTest<int>(thread_per_block, block_per_sm,smx_count,gpu_count,
+                size,repeat,skip,
+                useSM,useWarpSerial,useKernelLaunch);
+        break;
+        case 1:
+        runTest<float>(thread_per_block, block_per_sm,smx_count,gpu_count,
+                size,repeat,skip,
+                useSM,useWarpSerial,useKernelLaunch);
+        break;
+        case 2:
+        runTest<double>(thread_per_block, block_per_sm,smx_count,gpu_count,
+                size,repeat,skip,
+                useSM,useWarpSerial,useKernelLaunch);
+        break;
+
+    }
+    // free(h_input);
+
+ }
+
+
+
