@@ -477,7 +477,7 @@ void __forceinline__ launchKernelBasedReduction(T *g_idata, T *g_odata, unsigned
         }
         else
         {
-            fprintf(stderr,"switch to single block with size %d\n",n);
+            // fprintf(stderr,"switch to single block with size %d\n",n);
             cudaDeviceSynchronize();
             cudaCheckError();
             if(useSM==true)
@@ -505,7 +505,7 @@ void __forceinline__ gridBasedReduction(T *g_idata, T *g_odata, unsigned int gri
     }
     else
     {
-        fprintf(stderr,"switch to single block\n");
+        // fprintf(stderr,"switch to single block\n");
         if( useSM==true)
         {
             cudaLaunchCooperativeKernel((void*)reduce_kernel2<T,blockSize,true, useWarpSerial>, 1,blockSize, KernelArgs,blockSize*sizeof(T),0);
@@ -1233,12 +1233,10 @@ void single_test(double& microsecond, T&gpu_result, unsigned int gridSize, unsig
         single_test<type,threadcount,isPow2, useSM, useWarpSerial, useKernelLaunch>(microsecond, gpu_result, smx_count*block_per_sm,size, h_input,gpu_count);\
         lats[i]=microsecond;\
     }\
-    microsecond=0;\
     for(int i=skip; i<repeat; i++)\
     {\
-        microsecond+=lats[i];\
+        microsecond=min(microsecond,lats[i]);\
     }\
-    microsecond=microsecond/(repeat-skip);\
     free(lats);\
     }while(0)
 
@@ -1445,12 +1443,12 @@ int main(int argc, char **argv)
         {
         case 't':
             thread_per_block = std::stoi(optarg);
-            fprintf(stderr,"thread set to: %d\n",thread_per_block);
+            fprintf(stderr,"thread per block set to: %d\n",thread_per_block);
             break;
 
         case 'b':
             block_per_sm = std::stoi(optarg);
-            fprintf(stderr,"block set to: %d\n",block_per_sm);
+            fprintf(stderr,"block per sm set to: %d\n",block_per_sm);
             break;
 
         case 'g':
@@ -1498,7 +1496,7 @@ int main(int argc, char **argv)
 
         case 'k':
             useKernelLaunch = true;
-            fprintf(stderr,"useKernelLaunch is set to true\n");
+            fprintf(stderr,"use multiple KernelLaunch is set to true\n");
             break;
 
         default:
