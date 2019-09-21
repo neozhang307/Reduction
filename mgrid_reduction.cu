@@ -693,7 +693,7 @@ void __forceinline__ launchMultiKernelBasedReduction(double&microsecond, T **g_i
                 }
             }
         }
-        T* tmp_ptr_4g;
+        //T* tmp_ptr_4g;
         if(gpu_count<=4)
         {
             for(int i=0; i<gpu_count; i++)
@@ -703,21 +703,48 @@ void __forceinline__ launchMultiKernelBasedReduction(double&microsecond, T **g_i
                 destinate_ptr[0][i][0]=g_odata+i*size_gpu;
             }
         }
-        else if(gpu_count<=8)
-        {
-            cudaMalloc((void**)&tmp_ptr_4g, sizeof(T)*4*size_gpu);
-            for(int i=0; i<gpu_count-4; i++)
-            {
-                size[0][i+4][4]=size_gpu;
-                source_ptr[0][i+4][4]=g_tdata[i+4];
-                destinate_ptr[0][i+4][4]=tmp_ptr_4g+i*size_gpu;
-            }
+       // else if(gpu_count<=8)
+       // {
+           // for(int i=0; i<4; i++)
+           // {
+           //     size[0][i][0]=size_gpu;
+           //     source_ptr[0][i][0]=g_tdata[i];
+           //     destinate_ptr[0][i][0]=g_odata+i*size_gpu;
+           // }
+	   // cudaSetDevice(4);
+           // cudaMalloc((void**)&tmp_ptr_4g, sizeof(T)*4*size_gpu);
+           // for(int i=0; i<gpu_count-4; i++)
+           // {
+               // size[0][i+4][4]=size_gpu;
+              //  source_ptr[0][i+4][4]=g_tdata[i+4];
+             //   destinate_ptr[0][i+4][4]=tmp_ptr_4g+i*size_gpu;
+            //}
 
-            size[1][4][0]=size_gpu*4;
-            source_ptr[1][4][0]=tmp_ptr_4g;
-            destinate_ptr[1][4][0]=g_odata+4*size_gpu;
-        }
+          //  size[1][4][0]=size_gpu*(gpu_count-4);
+         //   source_ptr[1][4][0]=tmp_ptr_4g;
+        //    destinate_ptr[1][4][0]=g_odata+4*size_gpu;
+       // }
+    	for(int i=0; i<4; i++)
+    	{	
 
+	size[0][i][0]=size_gpu;
+	source_ptr[0][i][0]=g_tdata[i];
+	destinate_ptr[0][i][0]=g_odata+i*size_gpu;
+	}
+        cudaSetDevice(4);
+	T* tmp_ptr_4g;
+	cudaMalloc((void**)&tmp_ptr_4g, sizeof(T)*4*size_gpu);
+	for(int i=0; i<4; i++)
+	{
+		size[0][i+4][4]=size_gpu;
+		source_ptr[0][i+4][4]=g_tdata[i+4];
+		destinate_ptr[0][i+4][4]=tmp_ptr_4g+i*size_gpu;
+	}
+		        //4->0
+
+	size[1][4][0]=size_gpu*4;
+	source_ptr[1][4][0]=tmp_ptr_4g;
+	destinate_ptr[1][4][0]=g_odata+4*size_gpu;
 
         //compute time
         /************************************/
@@ -731,9 +758,8 @@ void __forceinline__ launchMultiKernelBasedReduction(double&microsecond, T **g_i
     #pragma omp barrier
             
             {
-                // cudaLaunchCooperativeKernel((void*)reduce_kernel1<T,nIsPow2>, gridSize, blockSize, packedKernelArgs[tid],0,mstream[tid]);
                 reduce_kernel1<T, nIsPow2><<<gridSize,blockSize>>>(g_idata[tid],g_tdata[tid],data_per_gpu); 
-            }
+	    }
             for(unsigned int step=0; step<totalsteps; step++)
             {
                 sync_last_step(size,tid,gpu_count,step,mstream);
@@ -843,6 +869,7 @@ void __forceinline__ launchBigKernelBasedReduction(double&microsecond, T **g_ida
     }
     else  if(gpu_count<=8)
     {
+	cudaSetDevice(0);
         cudaMalloc((void**)&tmp_ptr_0g,sizeof(T)*4*size_gpu);
         for(int i=0; i<4; i++)
         {
@@ -1077,6 +1104,7 @@ int main()
     unsigned int thread_per_block=1024;
     unsigned int block_per_sm=1;
     unsigned int data_per_thread=2;
+    unsigned int gpu_count=8;
     // unsigned int data_per_thread=2;
     // unsigned int type=0; 
 
@@ -1106,12 +1134,11 @@ int main()
     // {
     //     isPow2=false;
     // }
-    unsigned int gpu_count=2;
     unsigned int *access=(unsigned int*)malloc(sizeof(unsigned int)*gpu_count*gpu_count);
     getAceessMatrix(access,gpu_count);
     // switchall(T, thread_per_block, isPow2, useSM,useWarpSerial,useKernelLaunch);
 
-    my_single_test(double,1024,true,false,true,false,gpu_count);
+    my_single_test(double,1024,true,false,true,true,gpu_count);
 
     fprintf(stderr,"%f-%f=%f\n",cpu_result,(double)gpu_result,cpu_result*gpu_count-gpu_result);   
     printf("useSM: %d, use warp serial:%d, use kernel launch:%d, block/SM %d thread %d totalsize %lu time: %f us speed: %f GB/s\n",\
