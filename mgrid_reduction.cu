@@ -1005,7 +1005,7 @@ void __forceinline__ launchBigKernelBasedReduction(double&microsecond, T **g_ida
     }
 
     // from idata to t data in step 0
-    printf("data per gpu is %d\n",data_per_gpu);
+    //printf("data per gpu is %d\n",data_per_gpu);
     T* tmp_ptr_0g;
     T* tmp_ptr_4g;
 
