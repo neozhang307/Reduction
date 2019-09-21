@@ -1453,7 +1453,7 @@ int main(int argc, char **argv)
             fprintf(stderr,"block set to: %d\n",block_per_sm);
             break;
 
-        case 'b':
+        case 'g':
             gpu_count = std::stoi(optarg);
             fprintf(stderr,"gpu count set to: %d\n",gpu_count);
             break;
