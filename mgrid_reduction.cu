@@ -714,7 +714,7 @@ void __forceinline__ launchMultiKernelBasedReduction(double&microsecond, T **g_i
         cudaSetDevice(4);
         
         cudaMalloc((void**)&tmp_ptr_4g, sizeof(T)*4*size_gpu);
-        for(int i=0; i<4; i++)
+        for(int i=0; i<gpu_count-4; i++)
         {
                 size[0][i+4][4]=size_gpu;
                 source_ptr[0][i+4][4]=g_tdata[i+4];
@@ -722,7 +722,7 @@ void __forceinline__ launchMultiKernelBasedReduction(double&microsecond, T **g_i
         }
     //4->0
 
-        size[1][4][0]=size_gpu*4;
+        size[1][4][0]=size_gpu*(gpu_count-4);
         source_ptr[1][4][0]=tmp_ptr_4g;
         destinate_ptr[1][4][0]=g_odata+4*size_gpu;
     }
@@ -1258,7 +1258,7 @@ int main()
     unsigned int thread_per_block=1024;
     unsigned int block_per_sm=1;
     unsigned int data_per_thread=2;
-    unsigned int gpu_count=2;
+    unsigned int gpu_count=7;
     // unsigned int data_per_thread=2;
     // unsigned int type=0; 
 
