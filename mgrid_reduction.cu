@@ -635,9 +635,163 @@ void mc_transfer(T**g_idata, T*g_odata, unsigned int size_gpu, unsigned int gpu_
     }
 }
 //(omp)
-
 template <class T, unsigned int blockSize, bool nIsPow2,bool useSM, bool useWarpSerial>
 void __forceinline__ launchMultiKernelBasedReduction(double&microsecond, T **g_idata, T **g_tdata, T *g_odata, unsigned int gridSize,  unsigned int data_per_gpu, unsigned int gpu_count=1)
+{  
+
+        cudaStream_t *mstream = (cudaStream_t*)malloc(sizeof(cudaStream_t)*gpu_count);
+        
+        timespec tsstart,tsend;
+        long time_elapsed_ns;
+
+        //first compute
+        void***packedKernelArgs = (void***)malloc(sizeof(void**)*gpu_count); 
+        cudaLaunchParams *launchParamsList = (cudaLaunchParams *)malloc(
+            sizeof(cudaLaunchParams)*gpu_count);
+
+        for(int deviceid=0; deviceid<gpu_count;deviceid++)
+        {
+            cudaSetDevice(deviceid);
+            packedKernelArgs[deviceid]=(void**)malloc(sizeof(void*)*3);
+            packedKernelArgs[deviceid][0]=(void*)&g_idata[deviceid];
+            packedKernelArgs[deviceid][1]=(void*)&g_tdata[deviceid];
+            packedKernelArgs[deviceid][2]=(void*)&data_per_gpu;
+            cudaStreamCreate(&mstream[deviceid]);
+            
+            launchParamsList[deviceid].func=(void*)reduce_kernel1<T,nIsPow2>;
+            launchParamsList[deviceid].gridDim=gridSize;
+            launchParamsList[deviceid].blockDim=blockSize;
+            launchParamsList[deviceid].sharedMem=0;
+            launchParamsList[deviceid].stream=mstream[deviceid];
+            launchParamsList[deviceid].args=packedKernelArgs[deviceid];
+        }
+        cudaCheckError();
+        unsigned int size_gpu=blockSize*gridSize;
+        //initialize transfer strategy
+        unsigned int totalsteps=(gpu_count-1)/4+1;
+
+        T**** source_ptr=(T****)malloc(sizeof(T***)*totalsteps);
+        T**** destinate_ptr=(T****)malloc(sizeof(T***)*totalsteps);
+        // unsigned int size[1][2][2];
+        unsigned int ***size=(unsigned int***)malloc(sizeof(unsigned int**)*totalsteps);
+        for(int s=0; s<totalsteps; s++)
+        {
+            source_ptr[s]=(T***)malloc(sizeof(T**)*gpu_count);
+            destinate_ptr[s]=(T***)malloc(sizeof(T**)*gpu_count);
+            size[s]=(unsigned int **)malloc(sizeof(unsigned int *)*gpu_count);
+            for(int src_gpu=0; src_gpu<gpu_count; src_gpu++)
+            {
+                source_ptr[s][src_gpu]=(T**)malloc(sizeof(T*)*gpu_count);
+                destinate_ptr[s][src_gpu]=(T**)malloc(sizeof(T*)*gpu_count);
+                size[s][src_gpu]=(unsigned int *)malloc(sizeof(unsigned int )*gpu_count);
+                for(int dst_gpu=0; dst_gpu<gpu_count; dst_gpu++)
+                {
+                    source_ptr[s][src_gpu][dst_gpu]=NULL;
+                    destinate_ptr[s][src_gpu][dst_gpu]=NULL;
+                    size[s][src_gpu][dst_gpu]=0;
+                }
+            }
+        }
+    //0,1,2,3 -> 0 4,5,6,7->4
+    T* tmp_ptr_4g;
+    if(gpu_count<=4)
+    {
+        for(int i=0; i<gpu_count; i++)
+        {
+            size[0][i][0]=size_gpu;
+            source_ptr[0][i][0]=g_tdata[i];
+            destinate_ptr[0][i][0]=g_odata+i*size_gpu;
+        }
+    }
+    else
+    {
+        for(int i=0; i<4; i++)
+        {
+                size[0][i][0]=size_gpu;
+                source_ptr[0][i][0]=g_tdata[i];
+                destinate_ptr[0][i][0]=g_odata+i*size_gpu;
+        }
+        cudaSetDevice(4);
+        
+        cudaMalloc((void**)&tmp_ptr_4g, sizeof(T)*4*size_gpu);
+        for(int i=0; i<4; i++)
+        {
+                size[0][i+4][4]=size_gpu;
+                source_ptr[0][i+4][4]=g_tdata[i+4];
+                destinate_ptr[0][i+4][4]=tmp_ptr_4g+i*size_gpu;
+        }
+    //4->0
+
+        size[1][4][0]=size_gpu*4;
+        source_ptr[1][4][0]=tmp_ptr_4g;
+        destinate_ptr[1][4][0]=g_odata+4*size_gpu;
+    }
+        //compute time
+        /************************************/
+        clock_gettime(CLOCK_REALTIME, &tsstart);
+
+    #pragma omp parallel num_threads(gpu_count)
+        {
+            unsigned int tid=omp_get_thread_num() ;
+            cudaSetDevice(tid);
+            {
+                // cudaLaunchCooperativeKernel((void*)reduce_kernel1<T,nIsPow2>, gridSize, blockSize, packedKernelArgs[tid],0,mstream[tid]);
+                reduce_kernel1<T, nIsPow2><<<gridSize,blockSize>>>(g_idata[tid],g_tdata[tid],data_per_gpu); 
+            }
+            for(unsigned int step=0; step<totalsteps; step++)
+            {
+                sync_last_step(size,tid,gpu_count,step,mstream);
+                single_step_transfer<T>(source_ptr,destinate_ptr,size,tid,gpu_count,step,mstream);
+    #pragma omp barrier
+            }
+            if(tid==0)
+            {
+                sync_last_step(size,tid,gpu_count,totalsteps,mstream);
+                cudaSetDevice(0);
+                launchKernelBasedReduction<T,blockSize,true,useSM,useWarpSerial>(g_odata,g_odata,gridSize,size_gpu*gpu_count);
+                cudaDeviceSynchronize();
+            }
+        }
+
+        clock_gettime(CLOCK_REALTIME, &tsend);
+        /************************************/
+        time_elapsed_ns = (tsend.tv_nsec-tsstart.tv_nsec);
+        time_elapsed_ns += 1000000000*(tsend.tv_sec-tsstart.tv_sec);
+
+        microsecond = (double)time_elapsed_ns/1000;
+
+        cudaCheckError();
+
+        for(int deviceid=0; deviceid<gpu_count;deviceid++)
+        {
+            cudaSetDevice(deviceid);    
+            cudaCheckError();
+            cudaStreamDestroy(mstream[deviceid]);
+        }
+
+        cudaCheckError();
+
+        free(mstream);
+        free(packedKernelArgs);
+        free(launchParamsList);
+
+        for(int s=0; s<totalsteps; s++)
+        {
+            for(int src_gpu=0; src_gpu<gpu_count; src_gpu++)
+            {
+                free(source_ptr[s][src_gpu]);
+                free(destinate_ptr[s][src_gpu]);
+                free(size[s][src_gpu]);       
+            }
+            free(source_ptr[s]);
+            free(destinate_ptr[s]);
+            free(size[s]);
+        }
+}
+
+
+template <class T, unsigned int blockSize, bool nIsPow2,bool useSM, bool useWarpSerial>
+void __forceinline__ alaunchMultiKernelBasedReduction(double&microsecond, T **g_idata, T **g_tdata, T *g_odata, unsigned int gridSize,  unsigned int data_per_gpu, unsigned int gpu_count=1)
 {  
 
         cudaStream_t *mstream = (cudaStream_t*)malloc(sizeof(cudaStream_t)*gpu_count);
@@ -1104,7 +1258,7 @@ int main()
     unsigned int thread_per_block=1024;
     unsigned int block_per_sm=1;
     unsigned int data_per_thread=2;
-    unsigned int gpu_count=8;
+    unsigned int gpu_count=2;
     // unsigned int data_per_thread=2;
     // unsigned int type=0; 
 
