@@ -1368,10 +1368,10 @@ void runTest(unsigned int thread_per_block, unsigned int block_per_sm,
     switchall(T, thread_per_block, isPow2, useSM,useWarpSerial,useKernelLaunch);
 
     fprintf(stderr,"%f-%f=%f\n",cpu_result,(double)gpu_result,cpu_result*gpu_count-gpu_result);   
-    printf("useSM: %d, use warp serial:%d, use kernel launch:%d, block/SM %d thread %d totalsize %lu time: %f us speed: %f GB/s\n",\
+    printf("useSM: %d, use warp serial:%d, use kernel launch:%d, block/SM %d thread %d totalsize %lu Byte time: %f us speed: %f GB/s\n",\
           useSM, useWarpSerial,useKernelLaunch,\
-          block_per_sm,thread_per_block, (unsigned long)size*gpu_count,\
-          (double)microsecond, (double)size*gpu_count*sizeof(double)/1000/1000/1000/(microsecond/1000/1000));\
+          block_per_sm,thread_per_block, (unsigned long)size*gpu_count*sizeof(T),\
+          (double)microsecond, (double)size*gpu_count*sizeof(T)/1000/1000/1000/(microsecond/1000/1000));\
     free(access);
   
     free(h_input);   
