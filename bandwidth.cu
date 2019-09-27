@@ -9,50 +9,56 @@ namespace cg = cooperative_groups;
 __global__ void reduce_basic(double *g_idata, double *g_odata, unsigned int n)
 {
     unsigned int tid = blockIdx.x*blockDim.x + threadIdx.x;	
+    // unsigned int warp_id=tid/32;
    	unsigned int i=blockIdx.x*blockDim.x*2 + threadIdx.x;	
     unsigned int gridSize = blockDim.x*gridDim.x*2;
-    // printf("gridsize:%d\tblockdim:%d\tgridDim:%dn",gridSize, blockDim.x, gridDim.x);
+
+    // unsigned int  start,stop;
+
     double sum=0;
+
     while (i < n)
     {
     	sum+=g_idata[i];
       sum+=g_idata[i+blockDim.x];
-     //  sum+=g_idata[i];
-     //  i+=blockDim.x;
-     //  sum+=g_idata[i];
     	i += gridSize;
     }
     g_odata[tid]=sum;
 }
 
 
+__global__ void reduce_basic_warp(double *g_idata, double *g_odata, unsigned int n, unsigned int basicthread, unsigned int *time_stamp)
+{
+    cg::thread_block cta = cg::this_thread_block();
+    unsigned int tid = blockIdx.x*blockDim.x + threadIdx.x; 
+    unsigned int warp_id=tid/32;
+    unsigned int i=tid; 
+    unsigned int gridSize = basicthread*2;
 
+    unsigned int  start,stop;
+    
+    double sum=0;
 
-#define BASICREDUCE(DEP) \
-__global__ void reduce_basic_DEP##DEP(double *g_idata, double *g_odata, unsigned int n)\
-{\
-    unsigned int tid = blockIdx.x*blockDim.x + threadIdx.x; \
-    unsigned int i=blockIdx.x*blockDim.x*DEP + threadIdx.x; \
-    unsigned int gridSize = blockDim.x*gridDim.x*DEP-(DEP)*blockDim.x;\
-    double sum=0;\
-    while (i < n)\
-    {\
-      repeat##DEP(sum+=g_idata[i];i+=blockDim.x;);\
-      i+=gridSize;\
-    }\
-    g_odata[tid]=sum;\
+    if(tid<basicthread)
+    {
+      asm volatile ("mov.u32 %0, %%clock;" : "=r"(start) :: "memory");
+      while (i < n)
+      {
+        sum+=g_idata[i];
+        sum+=g_idata[i+basicthread];
+        i += gridSize;
+      }
+      asm volatile ("mov.u32 %0, %%clock;" : "=r"(stop) :: "memory");
+      
+    }
+    g_odata[tid]=sum;
+    if(i%32==0)
+    {
+        time_stamp[warp_id*2]=start;
+        time_stamp[warp_id*2+1]=stop;
+    }
 }
 
-BASICREDUCE(1)
-BASICREDUCE(2)
-BASICREDUCE(4)
-BASICREDUCE(8)
-BASICREDUCE(16)
-BASICREDUCE(32)
-BASICREDUCE(64)
-BASICREDUCE(128)
-BASICREDUCE(256)
-BASICREDUCE(512)
 
 __global__ void copy_basic(double *g_idata, double *g_odata, unsigned int n)
 {
@@ -72,128 +78,200 @@ __global__ void copy_basic(double *g_idata, double *g_odata, unsigned int n)
     }
 }
 
- #define single_test(func) \
- do{\
-	double* h_input;\
-	double* d_input;\
-	double* h_output;\
-	double* d_output;\
-	cudaEvent_t start, end;\
-	cudaEventCreate(&start);\
-	cudaEventCreate(&end);\
-\
-	cudaHostAlloc((void**)& h_input, size*sizeof(double), cudaHostAllocDefault);\
-	cudaHostAlloc((void**)& h_output, size*sizeof(double), cudaHostAllocDefault);\
-	cudaMalloc((void**)&d_input, size*sizeof(double));\
-	cudaMalloc((void**)&d_output, size*sizeof(double));\
-\
-	for(int i=0; i<size; i++)\
-	{\
-		h_input[i]=1;\
-	}\
-	cudaMemcpy(d_input, h_input, size*sizeof(double), cudaMemcpyHostToDevice);\
-	cudaEventRecord(start);\
-	func<<<block*smx_count,thread>>>(d_input,d_output,size);\
-	cudaEventRecord(end);\
-	cudaDeviceSynchronize();\
-	cudaError_t e=cudaGetLastError();\
-	if(e!=cudaSuccess) \
-    { \
-        printf("Cuda failure %s:%d: '%s'\n",__FILE__,__LINE__,cudaGetErrorString(e));\
-    }\
-	cudaEventElapsedTime(&millisecond,start,end);\
-	cudaFreeHost(h_input);\
-	cudaFreeHost(h_output);\
-	cudaFree(d_input);\
-	cudaFree(d_output);\
-	cudaEventDestroy(start);\
-	cudaEventDestroy(end);\
-	cudaDeviceReset();\
-}while(0)\
+void single_test(float& millisecond,
+                unsigned int size,
+                unsigned int blockPerSM,
+                unsigned int threadPerBlock,
+                unsigned int SMPerGPU)
+{
+  double* h_input;
+  double* d_input;
+  double* h_output;
+  double* d_output;
+  cudaEvent_t start, end;
+  cudaEventCreate(&start);
+  cudaEventCreate(&end);
 
- #define single_block_test(func) \
- do{\
-  double* h_input;\
-  double* d_input;\
-  double* h_output;\
-  double* d_output;\
-  cudaEvent_t start, end;\
-  cudaEventCreate(&start);\
-  cudaEventCreate(&end);\
-\
-  cudaHostAlloc((void**)& h_input, size*sizeof(double), cudaHostAllocDefault);\
-  cudaHostAlloc((void**)& h_output, size*sizeof(double), cudaHostAllocDefault);\
-  cudaMalloc((void**)&d_input, size*sizeof(double));\
-  cudaMalloc((void**)&d_output, size*sizeof(double));\
-\
-  for(int i=0; i<size; i++)\
-  {\
-    h_input[i]=1;\
-  }\
-  cudaMemcpy(d_input, h_input, size*sizeof(double), cudaMemcpyHostToDevice);\
-  cudaEventRecord(start);\
-  func<<<block,thread>>>(d_input,d_output,size);\
-  cudaEventRecord(end);\
-  cudaDeviceSynchronize();\
-  cudaError_t e=cudaGetLastError();\
-  if(e!=cudaSuccess) \
-    { \
-        printf("Cuda failure %s:%d: '%s'\n",__FILE__,__LINE__,cudaGetErrorString(e));\
-    }\
-  cudaEventElapsedTime(&millisecond,start,end);\
-  cudaFreeHost(h_input);\
-  cudaFreeHost(h_output);\
-  cudaFree(d_input);\
-  cudaFree(d_output);\
-  cudaEventDestroy(start);\
-  cudaEventDestroy(end);\
-  cudaDeviceReset();\
-}while(0)\
+  cudaHostAlloc((void**)& h_input, size*sizeof(double), cudaHostAllocDefault);
+  cudaHostAlloc((void**)& h_output, size*sizeof(double), cudaHostAllocDefault);
+  cudaMalloc((void**)&d_input, size*sizeof(double));
+  cudaMalloc((void**)&d_output, size*sizeof(double));
 
- #define single_warp_test() \
-    do{\
-    double* h_input;\
-    double* d_input;\
-    double* h_output;\
-    double* d_output;\
-    unsigned int* d_time_stamp;\
-    unsigned int* h_time_stamp=(unsigned int*)malloc(sizeof(unsigned int)*thread*2/32);\
-      \
-    cudaHostAlloc((void**)& h_input, smsize*sizeof(double), cudaHostAllocDefault);\
-    cudaHostAlloc((void**)& h_output, smsize*sizeof(double), cudaHostAllocDefault);\
-    cudaMalloc((void**)&d_input, smsize*sizeof(double));\
-    cudaMalloc((void**)&d_output, smsize*sizeof(double));\
-    cudaMalloc((void**)&d_time_stamp, thread*2/32*sizeof(unsigned int));\
-  \
-    for(int i=0; i<smsize; i++)\
-    {\
-      h_input[i]=1;\
-    }\
-    cudaMemcpy(d_input, h_input, smsize*sizeof(double), cudaMemcpyHostToDevice);\
-    reduce_basic_warp<<<1,thread>>>(d_input,d_output,smsize,executor_num,d_time_stamp);\
-    cudaMemcpy(h_time_stamp, d_time_stamp, thread*2/32*sizeof(unsigned int), cudaMemcpyDeviceToHost);\
-    cudaDeviceSynchronize();\
-    cudaError_t e=cudaGetLastError();\
-    if(e!=cudaSuccess) \
-      { \
-          printf("Cuda failure %s:%d: '%s'\n",__FILE__,__LINE__,cudaGetErrorString(e));\
-      }\
-      unsigned int start=h_time_stamp[0];\
-      unsigned int end=h_time_stamp[1];\
-      for(int i=1; i<thread/32; i++)\
-      {\
-        start=min(start,h_time_stamp[i*2]);\
-        end=max(end,h_time_stamp[i*2+1]);\
-      }\
-      latency_cycle=end-start;\
-      free(h_time_stamp);\
-    cudaFreeHost(h_input);\
-    cudaFree(d_time_stamp);\
-    cudaFreeHost(h_output);\
-    cudaFree(d_input);\
-    cudaFree(d_output);\
-    cudaDeviceReset();\
-  }while(0);\
+  for(int i=0; i<size; i++)
+  {
+    h_input[i]=1;
+  } 
+
+  cudaMemcpy(d_input, h_input, size*sizeof(double), cudaMemcpyHostToDevice);
+
+  cudaEventRecord(start);
+  reduce_basic<<<blockPerSM*SMPerGPU ,threadPerBlock>>>(d_input,d_output,size);
+  cudaEventRecord(end);
+  cudaDeviceSynchronize();
+  cudaError_t e=cudaGetLastError();
+  if(e!=cudaSuccess) 
+    { 
+        printf("Cuda failure %s:%d: '%s'\n",__FILE__,__LINE__,cudaGetErrorString(e));
+    }
+  cudaEventElapsedTime(&millisecond,start,end);
+  cudaFreeHost(h_input);
+  cudaFreeHost(h_output);
+  cudaFree(d_input);
+  cudaFree(d_output);
+  cudaEventDestroy(start);
+  cudaEventDestroy(end);
+  cudaDeviceReset();
+}
+
+double group_basic(
+                unsigned int repeat,
+                unsigned int skip,
+                unsigned int size,
+                unsigned int blockPerSM,
+                unsigned int threadPerBlock,
+                unsigned int SMPerGPU)
+{
+    float* milliseconds = (float*)malloc(sizeof(float)*repeat);
+    for(int i=0; i<repeat; i++)
+    {
+      single_test(milliseconds[i],
+                  size,
+                  blockPerSM,
+                  threadPerBlock,
+                  SMPerGPU);
+    }
+    double result=0;
+    for(int i=skip; i<repeat; i++)
+    {
+      result+=milliseconds[i];
+    }
+    result=result/(repeat-skip);
+    free(milliseconds);
+    return result;
+}
+
+void single_warp_test(unsigned int & latency_cycle,
+                unsigned int size,
+                unsigned int threadPerBlock,
+                unsigned int basicthread)
+{
+  unsigned int blockPerSM=1;
+  unsigned int SMPerGPU=1;
+
+  double* h_input;
+  double* d_input;
+  double* h_output;
+  double* d_output;
+  unsigned int* d_time_stamp;
+  unsigned int* h_time_stamp=(unsigned int*)malloc(sizeof(unsigned int)*threadPerBlock*2/32);
+
+  cudaHostAlloc((void**)& h_input, size*sizeof(double), cudaHostAllocDefault);
+  cudaHostAlloc((void**)& h_output, size*sizeof(double), cudaHostAllocDefault);
+  cudaMalloc((void**)&d_input, size*sizeof(double));
+  cudaMalloc((void**)&d_output, size*sizeof(double));
+  cudaMalloc((void**)&d_time_stamp, threadPerBlock*2/32*sizeof(unsigned int));
+  
+  for(int i=0; i<size; i++)
+  {
+    h_input[i]=1;
+  } 
+
+  cudaMemcpy(d_input, h_input, size*sizeof(double), cudaMemcpyHostToDevice);
+
+  reduce_basic_warp<<<blockPerSM*SMPerGPU ,threadPerBlock>>>(d_input,d_output,size,basicthread,d_time_stamp);
+
+  cudaMemcpy(h_time_stamp, d_time_stamp, threadPerBlock*2/32*sizeof(unsigned int), cudaMemcpyDeviceToHost);
+  cudaDeviceSynchronize(); 
+
+  cudaError_t e=cudaGetLastError();
+  if(e!=cudaSuccess) 
+  { 
+      printf("Cuda failure %s:%d: '%s'\n",__FILE__,__LINE__,cudaGetErrorString(e));
+  }
+
+  latency_cycle = h_time_stamp[1]-h_time_stamp[0];
+
+  free(h_time_stamp);
+
+  cudaFreeHost(h_input);
+  cudaFreeHost(h_output);
+  cudaFree(d_input);
+  cudaFree(d_output);
+  // cudaEventDestroy(start);
+  // cudaEventDestroy(end);
+  cudaDeviceReset();
+}
+
+double group_warp(
+                unsigned int repeat,
+                unsigned int skip,
+                unsigned int size,
+                unsigned int threadPerBlock,
+                unsigned int basicthread)
+{
+    unsigned int* latency_cycles = (unsigned int*)malloc(sizeof(unsigned int)*repeat);
+
+    for(int i=0; i<repeat; i++)
+    {
+      single_warp_test(latency_cycles[i],
+                  size,
+                  threadPerBlock,
+                  basicthread);
+    }
+
+    double result=0;
+    for(int i=skip; i<repeat; i++)
+    {
+      result+=latency_cycles[i];
+    }
+    result=result/(repeat-skip);
+    free(latency_cycles);
+    return result;
+}
+ // #define single_warp_test() \
+ //    do{\
+ //    double* h_input;\
+ //    double* d_input;\
+ //    double* h_output;\
+ //    double* d_output;\
+ //    unsigned int* d_time_stamp;\
+ //    unsigned int* h_time_stamp=(unsigned int*)malloc(sizeof(unsigned int)*thread*2/32);\
+ //      \
+ //    cudaHostAlloc((void**)& h_input, smsize*sizeof(double), cudaHostAllocDefault);\
+ //    cudaHostAlloc((void**)& h_output, smsize*sizeof(double), cudaHostAllocDefault);\
+ //    cudaMalloc((void**)&d_input, smsize*sizeof(double));\
+ //    cudaMalloc((void**)&d_output, smsize*sizeof(double));\
+ //    cudaMalloc((void**)&d_time_stamp, thread*2/32*sizeof(unsigned int));\
+ //  \
+ //    for(int i=0; i<smsize; i++)\
+ //    {\
+ //      h_input[i]=1;\
+ //    }\
+ //    cudaMemcpy(d_input, h_input, smsize*sizeof(double), cudaMemcpyHostToDevice);\
+ //    reduce_basic_warp<<<1,thread>>>(d_input,d_output,smsize,executor_num,d_time_stamp);\
+ //    cudaMemcpy(h_time_stamp, d_time_stamp, thread*2/32*sizeof(unsigned int), cudaMemcpyDeviceToHost);\
+ //    cudaDeviceSynchronize();\
+ //    cudaError_t e=cudaGetLastError();\
+ //    if(e!=cudaSuccess) \
+ //      { \
+ //          printf("Cuda failure %s:%d: '%s'\n",__FILE__,__LINE__,cudaGetErrorString(e));\
+ //      }\
+ //      unsigned int start=h_time_stamp[0];\
+ //      unsigned int end=h_time_stamp[1];\
+ //      for(int i=1; i<thread/32; i++)\
+ //      {\
+ //        start=min(start,h_time_stamp[i*2]);\
+ //        end=max(end,h_time_stamp[i*2+1]);\
+ //      }\
+ //      latency_cycle=end-start;\
+ //      free(h_time_stamp);\
+ //    cudaFreeHost(h_input);\
+ //    cudaFree(d_time_stamp);\
+ //    cudaFreeHost(h_output);\
+ //    cudaFree(d_input);\
+ //    cudaFree(d_output);\
+ //    cudaDeviceReset();\
+ //  }while(0);\
 
 #define TEST_TIME 1
 #define SKIP 0
@@ -226,88 +304,59 @@ int main()
   	cudaGetDeviceProperties(&deviceProp, 0);
   	unsigned int smx_count = deviceProp.multiProcessorCount;
 
-    unsigned int base=4096;
-    size=base*smx_count*2048;
+    unsigned int base=2048;
     
-    float millisecond;
-    float lats[TEST_TIME];
 
-  	
-   //  unsigned int block=1;
-  	// unsigned int thread = 1024;
+    // unsigned int block=1;
+    // unsigned int thread=1024;
+    unsigned int repeat=11;
+    unsigned int skip=1;
 
-    // for(int block=1; block<=64; block*=2)
-    // { 
-    //   for(int thread=32; thread<=1024; thread*=2)
-    //   {
-    //     for(int i=0; i<TEST_TIME; i++)
-    //     {
-    //        single_test(reduce_basic);
-    //        lats[i]=millisecond;
-    //     }
-    //     millisecond=0;
-    //    for(int i=SKIP; i<TEST_TIME; i++)
-    //     {
-    //       millisecond+=lats[i];
-    //     }
-    //     millisecond=millisecond/(TEST_TIME-SKIP);
-    //     printf("block/SM %d thread %d totalsize %d time: %f ms speed: %f GB/s\n",
-    //       block,thread, size,
-    //       millisecond, size*sizeof(double)*1000/millisecond/1000/1000/1000);
-    //   }
-    // }
-
-    // unsigned int base_size=base*2048;
-
-      // #define single_block(func) \
-      // for(int thread=32; thread<=1024; thread*=2)\
-      // {\
-      //   for(int i=0; i<TEST_TIME; i++)\
-      //   {\
-      //      single_block_test(func);\
-      //      lats[i]=millisecond;\
-      //   }\
-      //   millisecond=0;\
-      //  for(int i=SKIP; i<TEST_TIME; i++)\
-      //   {\
-      //     millisecond+=lats[i];\
-      //   }\
-      //   millisecond=millisecond/(TEST_TIME-SKIP);\
-      //   printf("func %s, block %d thread %d totalsize %d time: %f ms speed: %f GB/s\n",\
-      //     #func, block,thread, size,\
-      //     millisecond, size*sizeof(double)/millisecond/1000/1000);\
-      // }
-
-
-
-    //   for(unsigned int block=1; block<=80;block*=2)
-    //   {
-    //     size=block*base_size;
-    //     single_block(reduce_basic_DEP2);
-    //     single_block(reduce_basic_DEP4);
-    //     single_block(reduce_basic_DEP8);
-    //   }
-    //   unsigned int block=80;
-    //   size=block*base_size;
-    //   single_block(reduce_basic_DEP2);
-    //   single_block(reduce_basic_DEP4);
-    //   single_block(reduce_basic_DEP8);
-    unsigned int block=1;
-    for(unsigned int size=1; size<=2048*2048; size*=2)
+    size=base*32;
+    printf("test warp level bandwidth with size: %d*%d \n", size,sizeof(double));
+    printf("blck\tthrd\tltc(ccl)\tbdwdth(B/ccl)\n");
+    for(int i=1; i<=32; i*=2)
     {
-      single_size_test(reduce_basic_DEP2);
+        double result = group_warp(repeat,skip,
+                size,
+                32,
+                i);
+        printf("%d\t%d\t%f\t%f\n",1,i,result,size*sizeof(double)/result);
+    }    
+
+    size=base*1024;
+    printf("test block level bandwidth with size: %d*%d \n", size,sizeof(double));
+    printf("blck\tthrd\tltc(ms)\tbdwdth(GB/s)\n");
+    for(int thread=32; thread<=1024; thread*=2)
+    {
+        double result = group_basic(repeat,skip,size,1, thread,1);
+        printf("%d\t%d\t%f\t%f\n",1,thread,result,(double)size*sizeof(double)/1000/1000/1000/(result/1000));      
     }
 
-      // single_block(reduce_basic_DEP1);
-      // single_block(reduce_basic_DEP2);
-      // single_block(reduce_basic_DEP4);
-      // single_block(reduce_basic_DEP8);
-      // single_block(reduce_basic_DEP16);
-      // single_block(reduce_basic_DEP32);
-      // single_block(reduce_basic_DEP64);
-      // single_block(reduce_basic_DEP128);
-      // single_block(reduce_basic_DEP256);
-      // single_block(reduce_basic_DEP512);
-// printf("thread %d, executer %d, smsize %d, time: %d cycle speed: %f GB/s\n",
-//       thread, executor_num, smsize, latency, (double)smsize*sizeof(double)/latency);
+     size=base*smx_count*1024*2;
+    printf("test multi block level bandwidth with size: %d*%d \n", size,sizeof(double));
+    printf("blck\tthrd\tltc(ms)\tbdwdth(GB/s)\n");
+    for(int sm=1; sm<=smx_count; sm+=1)
+    {
+        double result = group_basic(repeat,skip,size,1, 1024, sm);
+        printf("%d\t%d\t%f\t%f\n",sm, 1024,result,(double)size*sizeof(double)/1000/1000/1000/(result/1000));     
+    }
+    double result = group_basic(repeat,skip,size,2, 1024, smx_count);
+    printf("%d\t%d\t%f\t%f\n",smx_count*2, 1024,result,(double)size*sizeof(double)/1000/1000/1000/(result/1000));    
+    // single_test(millisecond,
+    //             size,
+    //             block,
+    //             thread,
+    //             1);
+
+    // single_warp_test(latency_cycle,size,
+    //             32,32);
+    // double result = group_warp(11,
+    //             1,
+    //             size,
+    //             32,
+    //             32);
+    // printf("%f\n",(double)result);
+    // printf("%f\n",millisecond);
+  
     }
