@@ -14,6 +14,6 @@ dgxmgrid:  $(CUOBJS) $(COBJS) mgrid_reduction_dgx1.cu
 transfer: $(CUOBJS) $(COBJS) transfer.cu
 	nvcc $(CODEFLAG) -std=c++11 -rdc=true -o $@ $^
 band: bandwidth.cu
-	nvcc -arch sm_60 bandwidth.cu -o $@ $^
+	nvcc -arch sm_60 -o $@ $^
 clean:
 	rm  $(EXECUTABLE) 
