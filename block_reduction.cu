@@ -248,17 +248,20 @@ reduce_basic(double *g_idata, double *g_odata, unsigned int *time_stamp)
 {
     // Handle to thread block group
     cg::thread_block cta = cg::this_thread_block();
-    double __shared__ sdata[blockSize];
+    double __shared__ sdata[blockSize*2];
 
     unsigned int tid = threadIdx.x;
     unsigned int warp_id=tid/32;
 
     unsigned int  start,stop;
     double mySum = 0;
-
-    mySum += g_idata[tid];
+    sdata[tid]=g_idata[tid];
+    sdata[tid+blockSize]=g_idata[tid];
+    // mySum += g_idata[tid];
 
     asm volatile ("mov.u32 %0, %%clock;" : "=r"(start) :: "memory");
+    mySum+=sdata[tid+blockSize];
+    mySum+=sdata[tid];
     mySum=block_reduce_cuda_sample<double,blockSize>(mySum,sdata,cta);
     
     asm volatile ("mov.u32 %0, %%clock;" : "=r"(stop) :: "memory");
@@ -278,7 +281,7 @@ reduce_opt(double *g_idata, double *g_odata, unsigned int *time_stamp)
 {
     // Handle to thread block group
     cg::thread_block cta = cg::this_thread_block();
-    double __shared__ sdata[blockSize];
+    double __shared__ sdata[blockSize*2];
 
     unsigned int tid = threadIdx.x;
     unsigned int warp_id=tid/32;
@@ -286,12 +289,13 @@ reduce_opt(double *g_idata, double *g_odata, unsigned int *time_stamp)
     // unsigned int gridSize = blockSize*2*gridDim.x;
     unsigned int  start,stop;
     double mySum = 0;
-
-    mySum += g_idata[tid];
-
-    // each thread puts its local sum into shared memory
+    sdata[tid]=g_idata[tid];
+    sdata[tid+blockSize]=g_idata[tid];
+    // mySum += g_idata[tid];
 
     asm volatile ("mov.u32 %0, %%clock;" : "=r"(start) :: "memory");
+    mySum+=sdata[tid+blockSize];
+    mySum+=sdata[tid];
     mySum=block_reduce_cuda_sample_opt<double,blockSize>(mySum,sdata,cta);
     asm volatile ("mov.u32 %0, %%clock;" : "=r"(stop) :: "memory");
     if(tid%32==0)
@@ -307,18 +311,20 @@ reduce_small_share(double *g_idata, double *g_odata, unsigned int *time_stamp)
 {
     // Handle to thread block group
     cg::thread_block cta = cg::this_thread_block();
-    double __shared__ sdata[blockSize];
+    double __shared__ sdata[blockSize*2];
 
     unsigned int tid = threadIdx.x;
     unsigned int warp_id=tid/32;
 
     unsigned int  start,stop;
     double mySum = 0;
-
-    mySum += g_idata[tid];
+    sdata[tid]=g_idata[tid];
+    sdata[tid+blockSize]=g_idata[tid];
+    // mySum += g_idata[tid];
 
     asm volatile ("mov.u32 %0, %%clock;" : "=r"(start) :: "memory");
-
+    mySum+=sdata[tid+blockSize];
+    mySum+=sdata[tid];
     mySum=block_reduce_tilebase<double,blockSize>(mySum,sdata,cta);
 
     asm volatile ("mov.u32 %0, %%clock;" : "=r"(stop) :: "memory");
@@ -336,18 +342,22 @@ __global__ void
 reduce_reduce_sync(double *g_idata, double *g_odata, unsigned int *time_stamp)
 {
     cg::thread_block cta = cg::this_thread_block();
-    double __shared__ sdata[blockSize];
+    double __shared__ sdata[blockSize*2];
 
     unsigned int tid = threadIdx.x;
     unsigned int warp_id=tid/32;
 
     unsigned int  start,stop;
     double mySum = 0;
-
-    mySum += g_idata[tid];
+    sdata[tid]=g_idata[tid];
+    sdata[tid+blockSize]=g_idata[tid];
+    // mySum += g_idata[tid];
 
     asm volatile ("mov.u32 %0, %%clock;" : "=r"(start) :: "memory");
+    mySum+=sdata[tid+blockSize];
+    mySum+=sdata[tid];
     mySum=block_reduce_warpserial<double,blockSize>(mySum,sdata,cta);
+    // mySum=block_reduce_warpserial<double,blockSize>(mySum,sdata,cta);
     asm volatile ("mov.u32 %0, %%clock;" : "=r"(stop) :: "memory");
     if(tid%32==0)
     {
