@@ -59,6 +59,39 @@ __global__ void reduce_basic_warp(double *g_idata, double *g_odata, unsigned int
     }
 }
 
+__global__ void reduce_basic_warp_sm(double *g_idata, double *g_odata, unsigned int n, unsigned int basicthread, unsigned int *time_stamp)
+{
+    cg::thread_block cta = cg::this_thread_block();
+    unsigned int tid = blockIdx.x*blockDim.x + threadIdx.x; 
+    unsigned int warp_id=tid/32;
+    unsigned int i=tid; 
+    unsigned int gridSize = basicthread*2;
+
+    unsigned int  start,stop;
+    double __shared__ sm[1024];
+    sm[tid]=g_idata[tid];
+    double sum=0;
+
+    if(tid<basicthread)
+    {
+      asm volatile ("mov.u32 %0, %%clock;" : "=r"(start) :: "memory");
+      while (i < n)
+      {
+        sum+=sm[(i%1024)];
+        sum+=sm[(i+basicthread)%1024];
+        i += gridSize;
+      }
+      asm volatile ("mov.u32 %0, %%clock;" : "=r"(stop) :: "memory");
+      
+    }
+    g_odata[tid]=sum;
+    if(i%32==0)
+    {
+        time_stamp[warp_id*2]=start;
+        time_stamp[warp_id*2+1]=stop;
+    }
+}
+
 
 __global__ void copy_basic(double *g_idata, double *g_odata, unsigned int n)
 {
@@ -178,7 +211,7 @@ void single_warp_test(unsigned int & latency_cycle,
 
   cudaMemcpy(d_input, h_input, size*sizeof(double), cudaMemcpyHostToDevice);
 
-  reduce_basic_warp<<<blockPerSM*SMPerGPU ,threadPerBlock>>>(d_input,d_output,size,basicthread,d_time_stamp);
+  reduce_basic_warp_sm<<<blockPerSM*SMPerGPU ,threadPerBlock>>>(d_input,d_output,size,basicthread,d_time_stamp);
 
   cudaMemcpy(h_time_stamp, d_time_stamp, threadPerBlock*2/32*sizeof(unsigned int), cudaMemcpyDeviceToHost);
   cudaDeviceSynchronize(); 
@@ -313,7 +346,7 @@ int main()
     unsigned int skip=1;
 
     size=base*32;
-    printf("test warp level bandwidth with size: %d*%d \n", size,sizeof(double));
+    printf("test warp level bandwidth with size: %d*%lu \n", size,sizeof(double));
     printf("blck\tthrd\tltc(ccl)\tbdwdth(B/ccl)\n");
     for(int i=1; i<=32; i*=2)
     {
@@ -324,25 +357,35 @@ int main()
         printf("%d\t%d\t%f\t%f\n",1,i,result,size*sizeof(double)/result);
     }    
 
-    size=base*1024;
-    printf("test block level bandwidth with size: %d*%d \n", size,sizeof(double));
-    printf("blck\tthrd\tltc(ms)\tbdwdth(GB/s)\n");
-    for(int thread=32; thread<=1024; thread*=2)
+    for(int i=32; i<=1024; i*=2)
     {
-        double result = group_basic(repeat,skip,size,1, thread,1);
-        printf("%d\t%d\t%f\t%f\n",1,thread,result,(double)size*sizeof(double)/1000/1000/1000/(result/1000));      
-    }
+        double result = group_warp(repeat,skip,
+                size,
+                i,
+                i);
+        printf("%d\t%d\t%f\t%f\n",i,i,result,size*sizeof(double)/result);
+    }    
+    // size=base*1024;
+    // printf("test block level bandwidth with size: %d*%lu \n", size,sizeof(double));
+    // printf("blck\tthrd\tltc(ms)\tbdwdth(GB/s)\n");
+    // for(int thread=32; thread<=1024; thread*=2)
+    // {
+    //     double result = group_basic(repeat,skip,size,1, thread,1);
+    //     printf("%d\t%d\t%f\t%f\n",1,thread,result,(double)size*sizeof(double)/1000/1000/1000/(result/1000));      
+    // }
 
-     size=base*smx_count*1024*2;
-    printf("test multi block level bandwidth with size: %d*%d \n", size,sizeof(double));
-    printf("blck\tthrd\tltc(ms)\tbdwdth(GB/s)\n");
-    for(int sm=1; sm<=smx_count; sm+=1)
-    {
-        double result = group_basic(repeat,skip,size,1, 1024, sm);
-        printf("%d\t%d\t%f\t%f\n",sm, 1024,result,(double)size*sizeof(double)/1000/1000/1000/(result/1000));     
-    }
-    double result = group_basic(repeat,skip,size,2, 1024, smx_count);
-    printf("%d\t%d\t%f\t%f\n",smx_count*2, 1024,result,(double)size*sizeof(double)/1000/1000/1000/(result/1000));    
+    //  size=base*smx_count*1024*2;
+    // printf("test multi block level bandwidth with size: %d*%lu \n", size,sizeof(double));
+    // printf("blck\tthrd\tltc(ms)\tbdwdth(GB/s)\n");
+    // for(int sm=1; sm<=smx_count; sm+=1)
+    // {
+    //     double result = group_basic(repeat,skip,size,1, 1024, sm);
+    //     printf("%d\t%d\t%f\t%f\n",sm, 1024,result,(double)size*sizeof(double)/1000/1000/1000/(result/1000));     
+    // }
+    // double result = group_basic(repeat,skip,size,2, 1024, smx_count);
+    // printf("%d\t%d\t%f\t%f\n",smx_count*2, 1024,result,(double)size*sizeof(double)/1000/1000/1000/(result/1000));   
+
+
     // single_test(millisecond,
     //             size,
     //             block,
