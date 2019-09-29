@@ -262,6 +262,34 @@ __global__ void reduceBlock_NOSYNC(double*idata,double*output,unsigned int *time
     if(tid==0)
         output[tid]=sdata[tid];
 }
+
+__global__ void reduceBlock_FENCE(double*idata,double*output,unsigned int *time_stamp)
+{
+    cg::thread_block block = cg::this_thread_block();
+    cg::thread_block_tile<32> tile32 = cg::tiled_partition<32>(block);
+
+    double __shared__ volatile sdata[64];
+    unsigned int tid = block.thread_rank();
+    unsigned int  start,stop;
+
+    sdata[tid]=idata[tid];
+    sdata[tid+32]=0;
+
+    asm volatile ("mov.u32 %0, %%clock;" : "=r"(start) :: "memory");
+
+    sdata[tid]+=sdata[tid+16];
+    sdata[tid]+=sdata[tid+8];
+    sdata[tid]+=sdata[tid+4];
+    sdata[tid]+=sdata[tid+2];
+    sdata[tid]+=sdata[tid+1];
+
+    asm volatile ("mov.u32 %0, %%clock;" : "=r"(stop) :: "memory");
+    time_stamp[0]=start;
+    time_stamp[1]=stop;
+    if(tid==0)
+        output[tid]=sdata[tid];
+}
+
 __global__ void reduceBlock_SERIAL(double*idata,double*output,unsigned int *time_stamp)
 {
     cg::thread_block block = cg::this_thread_block();
@@ -398,7 +426,7 @@ int main()
     reduceBlock_COA<<<1,32>>>(d_input,d_output+5,d_time_stamp+10);
     reduceBlock_COAW<<<1,32>>>(d_input,d_output+6,d_time_stamp+12);
     reduceBlock_COA_SHUFFLE<<<1,32>>>(d_input,d_output+7,d_time_stamp+14);
-    reduceBlock_SERIAL_BASIC<<<1,32>>>(d_input,d_output+9,d_time_stamp+18);
+    reduceBlock_FENCE<<<1,32>>>(d_input,d_output+9,d_time_stamp+18);
     k_base_kernel<<<1,32>>>(2,4,d_output+10,d_time_stamp+20);
     cudaMemcpy(h_output, d_output, sizeof(double)*20, cudaMemcpyDeviceToHost);
     cudaMemcpy(h_time_stamp, d_time_stamp, sizeof(unsigned int)*40, cudaMemcpyDeviceToHost);
