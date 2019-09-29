@@ -68,7 +68,7 @@ __global__ void reduce_basic_warp_sm(double *g_idata, double *g_odata, unsigned 
     unsigned int gridSize = basicthread*2;
 
     unsigned int  start,stop;
-    double __shared__ sm[1024];
+    double __shared__ sm[1024*2];
     sm[tid]=g_idata[tid];
     double sum=0;
 
@@ -77,8 +77,8 @@ __global__ void reduce_basic_warp_sm(double *g_idata, double *g_odata, unsigned 
       asm volatile ("mov.u32 %0, %%clock;" : "=r"(start) :: "memory");
       while (i < n)
       {
-        sum+=sm[(i%1024)];
-        sum+=sm[(i+basicthread)%1024];
+        sum+=sm[tid];
+        sum+=sm[(tid+basicthread)];
         i += gridSize;
       }
       asm volatile ("mov.u32 %0, %%clock;" : "=r"(stop) :: "memory");
