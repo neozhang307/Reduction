@@ -361,12 +361,12 @@ T cpu_reduce(T* array, unsigned int array_size)
     return sum;
 }
 
-template <class T, unsigned int blockSize, bool nIsPow2,bool useSM, bool useWarpSerial>
+template <class T, unsigned int blockSize, bool nIsPow2,bool useSM, bool useWarpSerial, bool singleBlock>
 void __forceinline__ launchKernelBasedReduction(T *g_idata, T *g_odata, unsigned int gridSize,  unsigned int n)
 {  
     // unsigned int l_n=n;
         // if(true)
-        if(n>=304060.3592)
+        if(singleBlock==false)
         // if(true)
         {
             reduce_kernel1<T, nIsPow2><<<gridSize,blockSize>>>(g_idata,g_odata,n); 
@@ -378,7 +378,7 @@ void __forceinline__ launchKernelBasedReduction(T *g_idata, T *g_odata, unsigned
         }
         else
         {
-            fprintf(stderr,"switch to single block with size %d\n",n);
+            // fprintf(stderr,"switch to single block with size %d\n",n);
 
             if(useSM==true)
                 reduce_kernel2<T,blockSize,true, useWarpSerial><<<1,blockSize,blockSize*sizeof(T)>>>(g_idata,g_odata,n); 
@@ -388,11 +388,11 @@ void __forceinline__ launchKernelBasedReduction(T *g_idata, T *g_odata, unsigned
 
 
 }
-template <class T, unsigned int blockSize, bool nIsPow2,bool useSM, bool useWarpSerial>
+template <class T, unsigned int blockSize, bool nIsPow2,bool useSM, bool useWarpSerial, bool singleBlock>
 void __forceinline__ gridBasedReduction(T *g_idata, T *g_odata, unsigned int gridSize,  unsigned int n)
 {
     void* KernelArgs[] = {(void**)&g_idata,(void**)&g_odata,(void*)&n}; 
-    if(n>=410277.7719)
+    if(singleBlock==false)
     {
         if( useSM==true)
         {
@@ -405,7 +405,7 @@ void __forceinline__ gridBasedReduction(T *g_idata, T *g_odata, unsigned int gri
     }
     else
     {
-        fprintf(stderr,"switch to single block\n");
+        // fprintf(stderr,"switch to single block\n");
         // if( useSM==true)
         // {
         //     cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,true,useWarpSerial>, 1,blockSize, KernelArgs,blockSize*sizeof(T),0);
@@ -426,7 +426,7 @@ void __forceinline__ gridBasedReduction(T *g_idata, T *g_odata, unsigned int gri
 }
 
 
-template<class T, unsigned int blockSize, bool nIsPow2,bool useSM, bool useWarpSerial, bool useKernelLaunch>
+template<class T, unsigned int blockSize, bool nIsPow2,bool useSM, bool useWarpSerial, bool useKernelLaunch, bool singleBlock>
 void single_test(float& millisecond, T&gpu_result, unsigned int grid_size, unsigned int array_size ,T* h_input) 
 {    
     T* h_output = (T*)malloc(sizeof(T)*array_size); 
@@ -441,11 +441,11 @@ void single_test(float& millisecond, T&gpu_result, unsigned int grid_size, unsig
     cudaEventRecord(start);
     if(useKernelLaunch==true)
     {
-        launchKernelBasedReduction<T, blockSize,true,useSM,useWarpSerial>(d_input, d_output, grid_size,  array_size);
+        launchKernelBasedReduction<T, blockSize,true,useSM,useWarpSerial,singleBlock>(d_input, d_output, grid_size,  array_size);
     }
     else
     {
-        gridBasedReduction<T, blockSize,true,useSM,useWarpSerial>(d_input, d_output, grid_size,  array_size);
+        gridBasedReduction<T, blockSize,true,useSM,useWarpSerial,singleBlock>(d_input, d_output, grid_size,  array_size);
     }
     cudaEventRecord(end);
     cudaMemcpy(h_output, d_output, sizeof(T)*array_size, cudaMemcpyDeviceToHost); 
@@ -464,12 +464,12 @@ void single_test(float& millisecond, T&gpu_result, unsigned int grid_size, unsig
     cudaEventDestroy(end);
 }
 
-#define my_single_test(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch) \
+#define my_single_test(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch,singleBlock) \
  do{\
     double* lats=(double*)malloc(sizeof(double)*repeat);\
     for(int i=0; i<repeat; i++)\
     {\
-        single_test<type,threadcount,isPow2, useSM, useWarpSerial, useKernelLaunch>(millisecond, gpu_result, smx_count*block_per_sm,size, h_input);\
+        single_test<type,threadcount,isPow2, useSM, useWarpSerial, useKernelLaunch,singleBlock>(millisecond, gpu_result, smx_count*block_per_sm,size, h_input);\
         lats[i]=millisecond;\
     }\
     millisecond=0;\
@@ -480,46 +480,49 @@ void single_test(float& millisecond, T&gpu_result, unsigned int grid_size, unsig
     millisecond=millisecond/(repeat-skip);\
     free(lats);\
     }while(0)
+#define switchBlock(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch,singleBlock)\
+    if(singleBlock==true){my_single_test(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch,true);}\
+    if(singleBlock==false){my_single_test(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch,false);}\
 
-#define switchuseSM(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch)\
-    if(useSM==true){my_single_test(type,threadcount,isPow2,true,useWarpSerial,useKernelLaunch);}\
-    if(useSM==false){my_single_test(type,threadcount,isPow2,false,useWarpSerial,useKernelLaunch);}\
+#define switchuseSM(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch,singleBlock)\
+    if(useSM==true){switchBlock(type,threadcount,isPow2,true,useWarpSerial,useKernelLaunch,singleBlock);}\
+    if(useSM==false){switchBlock(type,threadcount,isPow2,false,useWarpSerial,useKernelLaunch,singleBlock);}\
 
-#define switchuseWarpSerial(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch)\
-    if(useWarpSerial==true){switchuseSM(type,threadcount,isPow2,useSM,true,useKernelLaunch);}\
-    if(useWarpSerial==false){switchuseSM(type,threadcount,isPow2,useSM,false,useKernelLaunch);}    
+#define switchuseWarpSerial(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch,singleBlock)\
+    if(useWarpSerial==true){switchuseSM(type,threadcount,isPow2,useSM,true,useKernelLaunch,singleBlock);}\
+    if(useWarpSerial==false){switchuseSM(type,threadcount,isPow2,useSM,false,useKernelLaunch,singleBlock);}    
 
-#define switchuseKernelLaunch(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch)\
-    if(useKernelLaunch==true){switchuseWarpSerial(type,threadcount,isPow2,useSM,useWarpSerial,true);}\
-    if(useKernelLaunch==false){switchuseWarpSerial(type,threadcount,isPow2,useSM,useWarpSerial,false);}    
+#define switchuseKernelLaunch(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch,singleBlock)\
+    if(useKernelLaunch==true){switchuseWarpSerial(type,threadcount,isPow2,useSM,useWarpSerial,true,singleBlock);}\
+    if(useKernelLaunch==false){switchuseWarpSerial(type,threadcount,isPow2,useSM,useWarpSerial,false,singleBlock);}    
 
-#define switchisPow2(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch)\
-    if(isPow2==true){switchuseKernelLaunch(type,threadcount,true,useSM,useWarpSerial,useKernelLaunch);}\
-    if(isPow2==false){switchuseKernelLaunch(type,threadcount,false,useSM,useWarpSerial,useKernelLaunch);}
+#define switchisPow2(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch,singleBlock)\
+    if(isPow2==true){switchuseKernelLaunch(type,threadcount,true,useSM,useWarpSerial,useKernelLaunch,singleBlock);}\
+    if(isPow2==false){switchuseKernelLaunch(type,threadcount,false,useSM,useWarpSerial,useKernelLaunch,singleBlock);}
 
 // #define switchall(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch)\
 //     switchisPow2(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch);
 
-#define switchall(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch)\
+#define switchall(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch,singleBlock)\
     switch(threadcount) \
     {\
         case 32:\
-            switchisPow2(type, 32, isPow2, useSM,useWarpSerial,useKernelLaunch);\
+            switchisPow2(type, 32, isPow2, useSM,useWarpSerial,useKernelLaunch,singleBlock);\
             break;\
         case 64:\
-            switchisPow2(type, 64, isPow2, useSM,useWarpSerial,useKernelLaunch);\
+            switchisPow2(type, 64, isPow2, useSM,useWarpSerial,useKernelLaunch,singleBlock);\
             break;\
         case 128:\
-            switchisPow2(type, 128, isPow2, useSM,useWarpSerial,useKernelLaunch);\
+            switchisPow2(type, 128, isPow2, useSM,useWarpSerial,useKernelLaunch,singleBlock);\
             break;\
         case 256:\
-            switchisPow2(type, 256, isPow2, useSM,useWarpSerial,useKernelLaunch);\
+            switchisPow2(type, 256, isPow2, useSM,useWarpSerial,useKernelLaunch,singleBlock);\
             break;\
         case 512:\
-            switchisPow2(type, 512, isPow2, useSM,useWarpSerial,useKernelLaunch);\
+            switchisPow2(type, 512, isPow2, useSM,useWarpSerial,useKernelLaunch,singleBlock);\
             break;\
         case 1024:\
-            switchisPow2(type, 1024, isPow2, useSM,useWarpSerial,useKernelLaunch);\
+            switchisPow2(type, 1024, isPow2, useSM,useWarpSerial,useKernelLaunch,singleBlock);\
             break;\
     }
 
@@ -533,7 +536,8 @@ void runTest(unsigned int thread_per_block, unsigned int block_per_sm,
     unsigned int skip,
     bool useSM,
     bool useWarpSerial,
-    bool useKernelLaunch
+    bool useKernelLaunch,
+    bool singleBlock
     )
 {
     float millisecond;
@@ -554,7 +558,7 @@ void runTest(unsigned int thread_per_block, unsigned int block_per_sm,
         isPow2=false;
     }
     
-    switchall(T, thread_per_block, isPow2, useSM,useWarpSerial,useKernelLaunch);
+    switchall(T, thread_per_block, isPow2, useSM,useWarpSerial,useKernelLaunch,singleBlock);
 
     fprintf(stderr,"%f-%f=%f\n",cpu_result,(double)gpu_result,cpu_result-gpu_result);   
     printf("useSM: %d, use warp serial:%d, use kernel launch:%d, block/SM %d thread %d totalsize %d time: %f ms speed: %f GB/s\n",\
@@ -577,6 +581,7 @@ void PrintHelp()
              --type <n>(v):             type of experiment (0:int 1:float 2:double)\n \
              --sharememory(s):          use shared memory at block level reduction (default false)\n \
              --warpserial(w):           use warpserial implementation (default false)\n \
+             --singleblk(g):            use single block instead of a grid\n \
              --kernellaunch(k):         use kernel launch as an implicit barrier (default false)\n");
     exit(1);
 }
@@ -599,12 +604,13 @@ int main(int argc, char **argv)
     bool useSM=false;
     bool useWarpSerial=false;
     bool useKernelLaunch=false;
+    bool singleBlock=false;
     unsigned int size = 0;
 
     unsigned int repeat=11;
     unsigned int skip=1;
 
-    const char* const short_opts = "t:b:a:n:r:v:swk";
+    const char* const short_opts = "t:b:a:n:r:v:swkg";
     const option long_opts[] = {
             {"thread", required_argument, nullptr, 't'},
             {"block", required_argument, nullptr, 'b'},
@@ -615,6 +621,7 @@ int main(int argc, char **argv)
             {"sharememory", no_argument, nullptr, 's'},
             {"warpserial", no_argument, nullptr, 'w'},
             {"kernellaunch", no_argument, nullptr, 'k'},
+            {"singleblock", no_argument, nullptr, 'g'},
             {nullptr, no_argument, nullptr, 0}
     };
 
@@ -679,7 +686,10 @@ int main(int argc, char **argv)
             useKernelLaunch = true;
             fprintf(stderr,"useKernelLaunch is set to true\n");
             break;
-
+        case 'g':
+            singleBlock = true;
+            fprintf(stderr,"useSingleBlock is set to true\n");
+            break;
         default:
             PrintHelp();
             break;
@@ -692,17 +702,17 @@ int main(int argc, char **argv)
         case 0:
         runTest<int>(thread_per_block, block_per_sm,smx_count,
                 size,repeat,skip,
-                useSM,useWarpSerial,useKernelLaunch);
+                useSM,useWarpSerial,useKernelLaunch,singleBlock);
         break;
         case 1:
         runTest<float>(thread_per_block, block_per_sm,smx_count,
                 size,repeat,skip,
-                useSM,useWarpSerial,useKernelLaunch);
+                useSM,useWarpSerial,useKernelLaunch,singleBlock);
         break;
         case 2:
         runTest<double>(thread_per_block, block_per_sm,smx_count,
                 size,repeat,skip,
-                useSM,useWarpSerial,useKernelLaunch);
+                useSM,useWarpSerial,useKernelLaunch,singleBlock);
         break;
 
     }
