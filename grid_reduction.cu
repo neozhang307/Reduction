@@ -221,7 +221,7 @@ struct SharedMemory<double>
     }
 };
 
-template <class T, unsigned int blockSize, bool nIsPow2, bool useSM, bool useWarpSerial>
+template <class T, unsigned int blockSize, bool nIsPow2, bool useSM, bool useWarpSerial, bool singleBlock>
 __global__ void
 reduce_grid(T *g_idata, T *g_odata, unsigned int n)
 /*
@@ -247,7 +247,7 @@ value index larger than n should be setted to 0 in advance;
     else
         sdata=g_odata;
     T  mySum = 0;
-    if(gridDim.x>1)
+    if(singleBlock==false)
     {
         mySum = serial_reduce<T,nIsPow2>(n, 
             threadIdx.x, blockIdx.x,
@@ -396,11 +396,11 @@ void __forceinline__ gridBasedReduction(T *g_idata, T *g_odata, unsigned int gri
     {
         if( useSM==true)
         {
-            cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,true,useWarpSerial>, gridSize,blockSize, KernelArgs,blockSize*sizeof(T),0);
+            cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,true,useWarpSerial,true>, gridSize,blockSize, KernelArgs,blockSize*sizeof(T),0);
         }   
         else
         {
-            cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,false,useWarpSerial>, gridSize,blockSize, KernelArgs,0,0);
+            cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,false,useWarpSerial,true>, gridSize,blockSize, KernelArgs,0,0);
         }
     }
     else
@@ -414,13 +414,21 @@ void __forceinline__ gridBasedReduction(T *g_idata, T *g_odata, unsigned int gri
         // {
         //     cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,false,useWarpSerial>, 1,blockSize, KernelArgs,0,0);
         // }
+        // if( useSM==true)
+        // {
+        //     cudaLaunchCooperativeKernel((void*)reduce_kernel2<T,blockSize,true, useWarpSerial>, 1,blockSize, KernelArgs,blockSize*sizeof(T),0);
+        // }   
+        // else
+        // {
+        //     cudaLaunchCooperativeKernel((void*)reduce_kernel2<T,blockSize,false, useWarpSerial>, 1,blockSize, KernelArgs,0,0);
+        // }
         if( useSM==true)
         {
-            cudaLaunchCooperativeKernel((void*)reduce_kernel2<T,blockSize,true, useWarpSerial>, 1,blockSize, KernelArgs,blockSize*sizeof(T),0);
+            cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,true,useWarpSerial,false>, 1,blockSize, KernelArgs,blockSize*sizeof(T),0);
         }   
         else
         {
-            cudaLaunchCooperativeKernel((void*)reduce_kernel2<T,blockSize,false, useWarpSerial>, 1,blockSize, KernelArgs,0,0);
+            cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,false,useWarpSerial,false>, 1,blockSize, KernelArgs,0,0);
         }
     }
 }
