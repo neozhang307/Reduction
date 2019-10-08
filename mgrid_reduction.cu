@@ -916,15 +916,19 @@ void __forceinline__ alaunchMultiKernelBasedReduction(double&microsecond, T **g_
 	    }
             for(unsigned int step=0; step<totalsteps; step++)
             {
-                sync_last_step(size,tid,gpu_count,step,mstream);
+    //            sync_last_step(size,tid,gpu_count,step,mstream);
+                cudaDeviceSynchronize();
+                #pragma omp barrier
                 single_step_transfer<T>(source_ptr,destinate_ptr,size,tid,gpu_count,step,mstream);
-    #pragma omp barrier
+
             }
+            cudaDeviceSynchronize();
+            #pragma omp barrier
             if(tid==0)
             {
                 
-                sync_last_step(size,tid,gpu_count,totalsteps,mstream);
-                cudaSetDevice(0);
+              //  sync_last_step(size,tid,gpu_count,totalsteps,mstream);
+                //cudaSetDevice(0);
                 launchKernelBasedReduction<T,blockSize,true,useSM,useWarpSerial>(g_odata,g_odata,gridSize,size_gpu*gpu_count);
                 cudaDeviceSynchronize();
             }
