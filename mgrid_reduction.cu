@@ -636,7 +636,7 @@ void mc_transfer(T**g_idata, T*g_odata, unsigned int size_gpu, unsigned int gpu_
 }
 //(omp)
 template <class T, unsigned int blockSize, bool nIsPow2,bool useSM, bool useWarpSerial>
-void __forceinline__ launchMultiKernelBasedReduction(double&microsecond, T **g_idata, T **g_tdata, T *g_odata, unsigned int gridSize,  unsigned int data_per_gpu, unsigned int gpu_count=1)
+void __forceinline__ alaunchMultiKernelBasedReduction(double&microsecond, T **g_idata, T **g_tdata, T *g_odata, unsigned int gridSize,  unsigned int data_per_gpu, unsigned int gpu_count=1)
 {  
 
         cudaStream_t *mstream = (cudaStream_t*)malloc(sizeof(cudaStream_t)*gpu_count);
@@ -791,7 +791,7 @@ void __forceinline__ launchMultiKernelBasedReduction(double&microsecond, T **g_i
 
 
 template <class T, unsigned int blockSize, bool nIsPow2,bool useSM, bool useWarpSerial>
-void __forceinline__ alaunchMultiKernelBasedReduction(double&microsecond, T **g_idata, T **g_tdata, T *g_odata, unsigned int gridSize,  unsigned int data_per_gpu, unsigned int gpu_count=1)
+void __forceinline__ launchMultiKernelBasedReduction(double&microsecond, T **g_idata, T **g_tdata, T *g_odata, unsigned int gridSize,  unsigned int data_per_gpu, unsigned int gpu_count=1)
 {  
 
         cudaStream_t *mstream = (cudaStream_t*)malloc(sizeof(cudaStream_t)*gpu_count);
