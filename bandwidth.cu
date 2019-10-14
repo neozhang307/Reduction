@@ -348,23 +348,30 @@ int main()
     size=base*32;
     printf("test warp level bandwidth with size: %d*%lu \n", size,sizeof(double));
     printf("blck\tthrd\tltc(ccl)\tbdwdth(B/ccl)\n");
-    for(int i=1; i<=32; i*=2)
+    for(int i=32; i<=32; i*=2)
     {
         double result = group_warp(repeat,skip,
                 size,
                 32,
-                i);
-        printf("%d\t%d\t%f\t%f\n",1,i,result,size*sizeof(double)/result);
+                32);
+        printf("%d\t%d\t%f\t%f\n",1,i,result/(size/32),size*sizeof(double)/result);
     }    
-
-    for(int i=32; i<=1024; i*=2)
-    {
-        double result = group_warp(repeat,skip,
-                size,
-                i,
-                i);
-        printf("%d\t%d\t%f\t%f\n",i,i,result,size*sizeof(double)/result);
-    }    
+    // for(int i=1; i<=32; i*=2)
+    // {
+    //     double result = group_warp(repeat,skip,
+    //             size,
+    //             32,
+    //             i);
+    //     printf("%d\t%d\t%f\t%f\n",1,i,result,size*sizeof(double)/result);
+    // }   
+    // for(int i=32; i<=1024; i*=2)
+    // {
+    //     double result = group_warp(repeat,skip,
+    //             size,
+    //             i,
+    //             i);
+    //     printf("%d\t%d\t%f\t%f\n",i,i,result,size*sizeof(double)/result);
+    // }    
     // size=base*1024;
     // printf("test block level bandwidth with size: %d*%lu \n", size,sizeof(double));
     // printf("blck\tthrd\tltc(ms)\tbdwdth(GB/s)\n");
