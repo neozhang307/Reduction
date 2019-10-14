@@ -34,7 +34,7 @@ __global__ void reduce_basic_warp(double *g_idata, double *g_odata, unsigned int
     unsigned int warp_id=tid/32;
     unsigned int i=tid; 
     unsigned int gridSize = basicthread*2;
-
+//    unsigned int gridSize2=1024*56*2;
     unsigned int  start,stop;
     
     double sum=0;
@@ -44,8 +44,10 @@ __global__ void reduce_basic_warp(double *g_idata, double *g_odata, unsigned int
       asm volatile ("mov.u32 %0, %%clock;" : "=r"(start) :: "memory");
       while (i < n)
       {
-        sum+=g_idata[i];
-        sum+=g_idata[i+basicthread];
+        sum+=g_idata[i%n];
+        sum+=g_idata[i+blockDim.x];
+       // j+=gridSize2;
+       // j+=gridSize2;
         i += gridSize;
       }
       asm volatile ("mov.u32 %0, %%clock;" : "=r"(stop) :: "memory");
@@ -65,7 +67,7 @@ __global__ void reduce_basic_warp_sm(double *g_idata, double *g_odata, unsigned 
     unsigned int tid = blockIdx.x*blockDim.x + threadIdx.x; 
     unsigned int warp_id=tid/32;
     unsigned int i=tid; 
-    unsigned int gridSize = basicthread*2;
+    unsigned int gridSize = basicthread;//*2;
 
     unsigned int  start,stop;
     double __shared__ sm[1024*2];
@@ -78,7 +80,7 @@ __global__ void reduce_basic_warp_sm(double *g_idata, double *g_odata, unsigned 
       while (i < n)
       {
         sum+=sm[tid];
-        sum+=sm[(tid+basicthread)];
+      //  sum+=sm[(tid+basicthread)];
         i += gridSize;
       }
       asm volatile ("mov.u32 %0, %%clock;" : "=r"(stop) :: "memory");
@@ -211,7 +213,7 @@ void single_warp_test(unsigned int & latency_cycle,
 
   cudaMemcpy(d_input, h_input, size*sizeof(double), cudaMemcpyHostToDevice);
 
-  reduce_basic_warp_sm<<<blockPerSM*SMPerGPU ,threadPerBlock>>>(d_input,d_output,size,basicthread,d_time_stamp);
+  reduce_basic_warp<<<blockPerSM*SMPerGPU ,threadPerBlock>>>(d_input,d_output,size,basicthread,d_time_stamp);
 
   cudaMemcpy(h_time_stamp, d_time_stamp, threadPerBlock*2/32*sizeof(unsigned int), cudaMemcpyDeviceToHost);
   cudaDeviceSynchronize(); 
@@ -331,7 +333,7 @@ double group_warp(
 
 int main()
 {
-	unsigned int size=500000000;
+	unsigned int size=1024*56*512;
  	cudaDeviceProp deviceProp;
   	cudaSetDevice(0);
   	cudaGetDeviceProperties(&deviceProp, 0);
@@ -345,7 +347,7 @@ int main()
     unsigned int repeat=11;
     unsigned int skip=1;
 
-    size=base*32;
+//    size=base*32;
     printf("test warp level bandwidth with size: %d*%lu \n", size,sizeof(double));
     printf("blck\tthrd\tltc(ccl)\tbdwdth(B/ccl)\n");
     for(int i=32; i<=32; i*=2)
@@ -353,8 +355,8 @@ int main()
         double result = group_warp(repeat,skip,
                 size,
                 32,
-                32);
-        printf("%d\t%d\t%f\t%f\n",1,i,result/(size/32),size*sizeof(double)/result);
+                1024*smx_count);
+        printf("%d\t%d\t%f\t%f\n",1,i,result/(size/(1024*smx_count)),size*sizeof(double)/result);
     }    
     // for(int i=1; i<=32; i*=2)
     // {
