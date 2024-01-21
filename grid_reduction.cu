@@ -220,14 +220,13 @@ struct SharedMemory<double>
         return (double *)__smem_d;
     }
 };
+#include <iostream>
 
-template <class T, unsigned int blockSize, bool nIsPow2, bool useSM, bool useWarpSerial, bool singleBlock>
+
+
+template <typename T, unsigned int blockSize, bool nIsPow2, bool useSM, bool useWarpSerial>
 __global__ void
-reduce_grid(T *g_idata, T *g_odata, unsigned int n)
-/*
-size of g_odata no smaller than n; equal to the multiply of blockSize; 
-value index larger than n should be setted to 0 in advance;
-*/
+reduce_grid_sb(T *g_idata, T *g_odata, unsigned int n)
 {
     // Handle to thread block group
     cg::thread_block cta = cg::this_thread_block();
@@ -247,7 +246,46 @@ value index larger than n should be setted to 0 in advance;
     else
         sdata=g_odata;
     T  mySum = 0;
-    if(singleBlock==false)
+    // if constexpr (singleBlock) 
+    {
+        // use fewer threads is more profitable
+        if(blockIdx.x==0)
+        {
+            mySum=0;
+            mySum = serial_reduce<T,nIsPow2>(n, 
+            threadIdx.x, 0,
+            blockDim.x, blockDim.x*1*2,
+                g_idata);
+
+            mySum=block_reduction(mySum, sdata, cta);
+            if (threadIdx.x == 0) g_odata[blockIdx.x] = mySum;
+        }
+    }
+
+}
+template <typename T, unsigned int blockSize, bool nIsPow2, bool useSM, bool useWarpSerial>
+__global__ void
+reduce_grid(T *g_idata, T *g_odata, unsigned int n)
+{
+    // Handle to thread block group
+    cg::thread_block cta = cg::this_thread_block();
+    cg::grid_group gg = cg::this_grid();
+    T (* block_reduction) (T, T*, cg::thread_block cta); 
+    if(useWarpSerial==true)
+    {
+        block_reduction=block_reduce_warpserial<T, blockSize>;
+    }
+    else
+    {
+        block_reduction=block_reduce_cuda_sample_opt<T, blockSize>;
+    }
+    T* sdata;
+    if(useSM==true)
+        sdata=SharedMemory<T>();
+    else
+        sdata=g_odata;
+    T  mySum = 0;
+
     {
         mySum = serial_reduce<T,nIsPow2>(n, 
             threadIdx.x, blockIdx.x,
@@ -268,21 +306,7 @@ value index larger than n should be setted to 0 in advance;
             if (threadIdx.x == 0) g_odata[blockIdx.x] = mySum;
         }
     }
-    else
-    {
-        // use fewer threads is more profitable
-        if(blockIdx.x==0)
-        {
-            mySum=0;
-            mySum = serial_reduce<T,nIsPow2>(n, 
-            threadIdx.x, 0,
-            blockDim.x, blockDim.x*1*2,
-                g_idata);
 
-            mySum=block_reduction(mySum, sdata, cta);
-            if (threadIdx.x == 0) g_odata[blockIdx.x] = mySum;
-        }
-    }
 }
 
 
@@ -364,13 +388,9 @@ T cpu_reduce(T* array, unsigned int array_size)
 template <class T, unsigned int blockSize, bool nIsPow2,bool useSM, bool useWarpSerial, bool singleBlock>
 void __forceinline__ launchKernelBasedReduction(T *g_idata, T *g_odata, unsigned int gridSize,  unsigned int n)
 {  
-    // unsigned int l_n=n;
-        // if(true)
         if(singleBlock==false)
-        // if(true)
         {
             reduce_kernel1<T, nIsPow2><<<gridSize,blockSize>>>(g_idata,g_odata,n); 
-            // l_n=blockSize*gridSize;
             if(useSM==true)
                 reduce_kernel2<T,blockSize,true, useWarpSerial><<<1,blockSize,blockSize*sizeof(T)>>>(g_odata,g_odata,blockSize*gridSize); 
             else
@@ -378,8 +398,6 @@ void __forceinline__ launchKernelBasedReduction(T *g_idata, T *g_odata, unsigned
         }
         else
         {
-            // fprintf(stderr,"switch to single block with size %d\n",n);
-
             if(useSM==true)
                 reduce_kernel2<T,blockSize,true, useWarpSerial><<<1,blockSize,blockSize*sizeof(T)>>>(g_idata,g_odata,n); 
             else
@@ -396,39 +414,22 @@ void __forceinline__ gridBasedReduction(T *g_idata, T *g_odata, unsigned int gri
     {
         if( useSM==true)
         {
-            cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,true,useWarpSerial,true>, gridSize,blockSize, KernelArgs,blockSize*sizeof(T),0);
+            cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,true,useWarpSerial>, gridSize,blockSize, KernelArgs,blockSize*sizeof(T),0);
         }   
         else
         {
-            cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,false,useWarpSerial,true>, gridSize,blockSize, KernelArgs,0,0);
+            cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,false,useWarpSerial>, gridSize,blockSize, KernelArgs,0,0);
         }
     }
     else
     {
-        // fprintf(stderr,"switch to single block\n");
-        // if( useSM==true)
-        // {
-        //     cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,true,useWarpSerial>, 1,blockSize, KernelArgs,blockSize*sizeof(T),0);
-        // }   
-        // else
-        // {
-        //     cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,false,useWarpSerial>, 1,blockSize, KernelArgs,0,0);
-        // }
-        // if( useSM==true)
-        // {
-        //     cudaLaunchCooperativeKernel((void*)reduce_kernel2<T,blockSize,true, useWarpSerial>, 1,blockSize, KernelArgs,blockSize*sizeof(T),0);
-        // }   
-        // else
-        // {
-        //     cudaLaunchCooperativeKernel((void*)reduce_kernel2<T,blockSize,false, useWarpSerial>, 1,blockSize, KernelArgs,0,0);
-        // }
         if( useSM==true)
         {
-            cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,true,useWarpSerial,false>, 1,blockSize, KernelArgs,blockSize*sizeof(T),0);
+            cudaLaunchCooperativeKernel((void*)reduce_grid_sb<T,blockSize,nIsPow2,true,useWarpSerial>, 1,blockSize, KernelArgs,blockSize*sizeof(T),0);
         }   
         else
         {
-            cudaLaunchCooperativeKernel((void*)reduce_grid<T,blockSize,nIsPow2,false,useWarpSerial,false>, 1,blockSize, KernelArgs,0,0);
+            cudaLaunchCooperativeKernel((void*)reduce_grid_sb<T,blockSize,nIsPow2,false,useWarpSerial>, 1,blockSize, KernelArgs,0,0);
         }
     }
 }
@@ -450,9 +451,17 @@ void single_test(float& millisecond, T&gpu_result, unsigned int grid_size, unsig
     if(useKernelLaunch==true)
     {
         launchKernelBasedReduction<T, blockSize,true,useSM,useWarpSerial,singleBlock>(d_input, d_output, grid_size,  array_size);
+        launchKernelBasedReduction<T, blockSize,true,useSM,useWarpSerial,singleBlock>(d_input, d_output, grid_size,  array_size);
+        launchKernelBasedReduction<T, blockSize,true,useSM,useWarpSerial,singleBlock>(d_input, d_output, grid_size,  array_size);
+        launchKernelBasedReduction<T, blockSize,true,useSM,useWarpSerial,singleBlock>(d_input, d_output, grid_size,  array_size);
+        launchKernelBasedReduction<T, blockSize,true,useSM,useWarpSerial,singleBlock>(d_input, d_output, grid_size,  array_size);
     }
     else
     {
+        gridBasedReduction<T, blockSize,true,useSM,useWarpSerial,singleBlock>(d_input, d_output, grid_size,  array_size);
+        gridBasedReduction<T, blockSize,true,useSM,useWarpSerial,singleBlock>(d_input, d_output, grid_size,  array_size);
+        gridBasedReduction<T, blockSize,true,useSM,useWarpSerial,singleBlock>(d_input, d_output, grid_size,  array_size);
+        gridBasedReduction<T, blockSize,true,useSM,useWarpSerial,singleBlock>(d_input, d_output, grid_size,  array_size);
         gridBasedReduction<T, blockSize,true,useSM,useWarpSerial,singleBlock>(d_input, d_output, grid_size,  array_size);
     }
     cudaEventRecord(end);
@@ -465,6 +474,7 @@ void single_test(float& millisecond, T&gpu_result, unsigned int grid_size, unsig
         printf("Cuda failure %s:%d: '%s'\n",__FILE__,__LINE__,cudaGetErrorString(e));
     }
     cudaEventElapsedTime(&millisecond,start,end);
+    millisecond/=5;
     free(h_output);
     cudaFree(d_input);
     cudaFree(d_output);
@@ -508,8 +518,6 @@ void single_test(float& millisecond, T&gpu_result, unsigned int grid_size, unsig
     if(isPow2==true){switchuseKernelLaunch(type,threadcount,true,useSM,useWarpSerial,useKernelLaunch,singleBlock);}\
     if(isPow2==false){switchuseKernelLaunch(type,threadcount,false,useSM,useWarpSerial,useKernelLaunch,singleBlock);}
 
-// #define switchall(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch)\
-//     switchisPow2(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch);
 
 #define switchall(type,threadcount,isPow2,useSM,useWarpSerial,useKernelLaunch,singleBlock)\
     switch(threadcount) \
@@ -615,8 +623,8 @@ int main(int argc, char **argv)
     bool singleBlock=false;
     unsigned int size = 0;
 
-    unsigned int repeat=11;
-    unsigned int skip=1;
+    unsigned int repeat=12;
+    unsigned int skip=2;
 
     const char* const short_opts = "t:b:a:n:r:v:swkg";
     const option long_opts[] = {
@@ -724,7 +732,5 @@ int main(int argc, char **argv)
         break;
 
     }
-    // free(h_input);
-
  }
 
