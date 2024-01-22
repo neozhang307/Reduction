@@ -518,9 +518,52 @@ void __forceinline__ gridBasedReduction(T *g_idata, T *g_odata, unsigned int gri
     }
 }
 
+void checkP2P( unsigned int gpu_count)
+{
+     //check if P2P is uspported
+     fprintf(stderr, "CHECKING if P2P is supported\n");
+     int can_access_peer;
+     // int *p2pCapableGPUs=(int*)malloc(sizeof(int)*gpu_count);
+     int accumulate=0;
+     // int p2pCapableGPUs[2]; // We take only 1 pair of P2P capable GPUs
+     // p2pCapableGPUs[0] = p2pCapableGPUs[1] = -1;
+     cudaDeviceProp prop[64];
+     // int gpuid[2]; // we want to find the first two GPU's that can support P2P
+ 
+     for (int i=0; i < gpu_count; i++)
+     {
+         (cudaGetDeviceProperties(&prop[i], i));
+         cudaCheckError();
+     }
+ 
+     // Show all the combinations of supported P2P GPUs
+     for (int i = 0; i < gpu_count; i++)
+     {
+         for (int j = 0; j < gpu_count; j++)
+         {
+             if (i == j)
+             {
+                 continue;
+             }
+             (cudaDeviceCanAccessPeer(&can_access_peer, i, j));
+             cudaCheckError();
+             printf("> Peer access from %s (GPU%d) -> %s (GPU%d) : %s\n", prop[i].name, i,
+                            prop[j].name, j, can_access_peer ? "Yes" : "No");
+             accumulate+=can_access_peer;
+         }
+     }
+ 
+     if (accumulate == 0)
+     {
+         // printf("Two or more GPUs with Peer-to-Peer access capability are required for %s.\n", argv[0]);
+         printf("Peer to Peer access is not available amongst GPUs in the system, waiving test.\n");
+         exit(-1);
+     }
+}
 //though there are no peer access in single gpu. I set it as CAN peer access here.
 void getAceessMatrix(unsigned int *access, unsigned int gpu_count)
 {
+    
     for(int s=0; s<gpu_count; s++)
     {
         cudaSetDevice(s);
@@ -833,6 +876,8 @@ void __forceinline__ launchMultiKernelBasedReduction(double&microsecond, T **g_i
                 }
             }
         }
+        // T* tmp_ptr_0g;
+        T* tmp_ptr_4g;
         //T* tmp_ptr_4g;
         if(gpu_count<=4)
         {
@@ -843,49 +888,28 @@ void __forceinline__ launchMultiKernelBasedReduction(double&microsecond, T **g_i
                 destinate_ptr[0][i][0]=g_odata+i*size_gpu;
             }
         }
-       // else if(gpu_count<=8)
-       // {
-           // for(int i=0; i<4; i++)
-           // {
-           //     size[0][i][0]=size_gpu;
-           //     source_ptr[0][i][0]=g_tdata[i];
-           //     destinate_ptr[0][i][0]=g_odata+i*size_gpu;
-           // }
-	   // cudaSetDevice(4);
-           // cudaMalloc((void**)&tmp_ptr_4g, sizeof(T)*4*size_gpu);
-           // for(int i=0; i<gpu_count-4; i++)
-           // {
-               // size[0][i+4][4]=size_gpu;
-              //  source_ptr[0][i+4][4]=g_tdata[i+4];
-             //   destinate_ptr[0][i+4][4]=tmp_ptr_4g+i*size_gpu;
-            //}
+       else if(gpu_count<=8)
+       {
+           for(int i=0; i<4; i++)
+           {
+               size[0][i][0]=size_gpu;
+               source_ptr[0][i][0]=g_tdata[i];
+               destinate_ptr[0][i][0]=g_odata+i*size_gpu;
+           }
+	        cudaSetDevice(4);
+            cudaMalloc((void**)&tmp_ptr_4g, sizeof(T)*4*size_gpu);
+           for(int i=0; i<gpu_count-4; i++)
+           {
+               size[0][i+4][4]=size_gpu;
+               source_ptr[0][i+4][4]=g_tdata[i+4];
+               destinate_ptr[0][i+4][4]=tmp_ptr_4g+i*size_gpu;
+            }
 
-          //  size[1][4][0]=size_gpu*(gpu_count-4);
-         //   source_ptr[1][4][0]=tmp_ptr_4g;
-        //    destinate_ptr[1][4][0]=g_odata+4*size_gpu;
-       // }
-    // 	for(int i=0; i<4; i++)
-    // 	{	
+           size[1][4][0]=size_gpu*(gpu_count-4);
+           source_ptr[1][4][0]=tmp_ptr_4g;
+           destinate_ptr[1][4][0]=g_odata+4*size_gpu;
+       }
 
-    //         size[0][i][0]=size_gpu;
-    //         source_ptr[0][i][0]=g_tdata[i];
-    //         destinate_ptr[0][i][0]=g_odata+i*size_gpu;
-    //     }
-    //     cudaSetDevice(4);
-        
-	// T* tmp_ptr_4g;
-	// cudaMalloc((void**)&tmp_ptr_4g, sizeof(T)*4*size_gpu);
-	// for(int i=0; i<4; i++)
-	// {
-	// 	size[0][i+4][4]=size_gpu;
-	// 	source_ptr[0][i+4][4]=g_tdata[i+4];
-	// 	destinate_ptr[0][i+4][4]=tmp_ptr_4g+i*size_gpu;
-	// }
-	// 	        //4->0
-
-	// size[1][4][0]=size_gpu*4;
-	// source_ptr[1][4][0]=tmp_ptr_4g;
-	// destinate_ptr[1][4][0]=g_odata+4*size_gpu;
 
         clock_gettime(CLOCK_REALTIME, &tsstart);
 
@@ -894,16 +918,16 @@ void __forceinline__ launchMultiKernelBasedReduction(double&microsecond, T **g_i
             unsigned int tid=omp_get_thread_num() ;  
             cudaSetDevice(tid);
 
-    #pragma omp barrier
+            #pragma omp barrier
             
             {
                 reduce_kernel1<T, nIsPow2><<<gridSize,blockSize>>>(g_idata[tid],g_tdata[tid],data_per_gpu); 
-	    }
+	        }
             for(unsigned int step=0; step<totalsteps; step++)
             {
-    //            sync_last_step(size,tid,gpu_count,step,mstream);
-                cudaDeviceSynchronize();
-                #pragma omp barrier
+               sync_last_step(size,tid,gpu_count,step,mstream);
+                // cudaDeviceSynchronize();
+                // #pragma omp barrier
                 single_step_transfer<T>(source_ptr,destinate_ptr,size,tid,gpu_count,step,mstream);
 
             }
@@ -912,8 +936,8 @@ void __forceinline__ launchMultiKernelBasedReduction(double&microsecond, T **g_i
             if(tid==0)
             {
                 
-              //  sync_last_step(size,tid,gpu_count,totalsteps,mstream);
-                //cudaSetDevice(0);
+               sync_last_step(size,tid,gpu_count,totalsteps,mstream);
+                // cudaSetDevice(0);
                 launchKernelBasedReduction<T,blockSize,true,useSM,useWarpSerial>(g_odata,g_odata,gridSize,size_gpu*gpu_count);
                 cudaDeviceSynchronize();
             }
@@ -953,55 +977,17 @@ void __forceinline__ launchMultiKernelBasedReduction(double&microsecond, T **g_i
                 free(destinate_ptr[s]);
                 free(size[s]);
             }
-            // if(gpu_count>4)
-            // {
-            //     free(tmp_ptr_4g);
-            // }
+            if(gpu_count>4)
+            {
+                cudaSetDevice(4);
+                cudaFree(tmp_ptr_4g);
+            }
         }
 }
 template <class T, unsigned int blockSize, bool nIsPow2,bool useSM, bool useWarpSerial>
 void __forceinline__ launchBigKernelBasedReduction(double&microsecond, T **g_idata,  T **g_tdata, T *g_odata, unsigned int gridSize,  unsigned int data_per_gpu, unsigned int gpu_count=1)
 {  
-    //check if P2P is uspported
-    fprintf(stderr, "CHECKING if P2P is supported\n");
-    int can_access_peer;
-    // int *p2pCapableGPUs=(int*)malloc(sizeof(int)*gpu_count);
-    int accumulate=0;
-    // int p2pCapableGPUs[2]; // We take only 1 pair of P2P capable GPUs
-    // p2pCapableGPUs[0] = p2pCapableGPUs[1] = -1;
-    cudaDeviceProp prop[64];
-    // int gpuid[2]; // we want to find the first two GPU's that can support P2P
-
-    for (int i=0; i < gpu_count; i++)
-    {
-        (cudaGetDeviceProperties(&prop[i], i));
-        cudaCheckError();
-    }
-
-    // Show all the combinations of supported P2P GPUs
-    for (int i = 0; i < gpu_count; i++)
-    {
-        for (int j = 0; j < gpu_count; j++)
-        {
-            if (i == j)
-            {
-                continue;
-            }
-            (cudaDeviceCanAccessPeer(&can_access_peer, i, j));
-            cudaCheckError();
-            printf("> Peer access from %s (GPU%d) -> %s (GPU%d) : %s\n", prop[i].name, i,
-                           prop[j].name, j, can_access_peer ? "Yes" : "No");
-            accumulate+=can_access_peer;
-        }
-    }
-
-    if (accumulate == 0)
-    {
-        // printf("Two or more GPUs with Peer-to-Peer access capability are required for %s.\n", argv[0]);
-        printf("Peer to Peer access is not available amongst GPUs in the system, waiving test.\n");
-
-        exit(0);
-    }
+   
 
 
     // [gpu][step]ptr
@@ -1227,6 +1213,7 @@ void single_test(double& microsecond, T&gpu_result, unsigned int gridSize, unsig
     }
     else
     {
+        checkP2P(gpu_count);
         launchBigKernelBasedReduction<T, blockSize,nIsPow2,useSM,useWarpSerial>(microsecond, d_input, d_tmp,d_output, gridSize,  l_array_size, gpu_count);
     }
 
